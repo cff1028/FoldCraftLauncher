@@ -13,6 +13,7 @@ object RendererManager {
     lateinit var RENDERER_ZINK: Renderer
     lateinit var RENDERER_NGGL4ES: Renderer
     lateinit var RENDERER_MOBILEGLUES: Renderer
+    lateinit var RENDERER_QUEST_MOBILEGLUES: Renderer
     private var isInit = false
 
     @JvmStatic
@@ -82,20 +83,31 @@ object RendererManager {
             displayMaxMCver = "26.2"
         )
 
-        // SFPEW 兼容层对内置 MG 硬编码启用，组合后无 MC 版本下界（旧版固定管线由层补齐），
-        // 故注册信息不再声明 minMCver（版本门控与列表展示均按无下界处理）
         RENDERER_MOBILEGLUES = Renderer(
-            "MobileGlues",
-            context.getString(R.string.settings_fcl_renderer_mobileglues),
-            "libmobileglues.so",
-            "libmobileglues.so",
-            "",
-            null,
-            null,
-            Renderer.ID_MOBILEGLUES,
-            "",
-            "26.3-snapshot-3",
-            displayMaxMCver = "26.2"
+            name = "MobileGlues 2.0.0",
+            des = context.getString(R.string.settings_renderer_mobileglues),
+            glName = "libquest_mobileglues.so",
+            eglName = "libmobileglues.so",
+            path = "",
+            boatEnv = null,
+            pojavEnv = null,
+            id = Renderer.ID_MOBILEGLUES,
+            displayMaxMCver = "26.2",
+            vrCompatible = false,
+            vrOnly = false
+        )
+        RENDERER_QUEST_MOBILEGLUES = Renderer(
+            name = "MobileGlues VR",
+            des = context.getString(R.string.settings_vr_renderer_mobileglues),
+            glName = "libquest_mobileglues.so",
+            eglName = "libEGL.so",
+            path = "",
+            boatEnv = null,
+            pojavEnv = null,
+            id = Renderer.ID_QUEST_MOBILEGLUES,
+            displayMaxMCver = "26.2",
+            vrCompatible = true,
+            vrOnly = true
         )
 
         RendererPlugin.init(context)
@@ -109,6 +121,7 @@ object RendererManager {
         rendererList.add(RENDERER_VGPU)
         rendererList.add(RENDERER_ZINK)
         rendererList.add(RENDERER_MOBILEGLUES)
+        rendererList.add(RENDERER_QUEST_MOBILEGLUES)
         rendererList.addAll(RendererPlugin.rendererList)
     }
 
@@ -127,7 +140,21 @@ object RendererManager {
 
     @JvmStatic
     fun getRenderer(id: String): Renderer {
-        return rendererList.find { it.id == id } ?: RENDERER_NGGL4ES
+        val resolvedId = if (id == "mobileglues") Renderer.ID_MOBILEGLUES else id
+        return rendererList.find { it.id == resolvedId } ?: RENDERER_NGGL4ES
+    }
+
+    @JvmStatic
+    fun getRenderersForMode(vrEnabled: Boolean): List<Renderer> = rendererList.filter {
+        if (vrEnabled) it.vrCompatible else !it.vrOnly
+    }
+
+    @JvmStatic
+    fun getRendererForMode(id: String, vrEnabled: Boolean): Renderer {
+        val allowed = getRenderersForMode(vrEnabled)
+        val resolvedId = if (id == "mobileglues") Renderer.ID_MOBILEGLUES else id
+        return allowed.find { it.id == resolvedId }
+            ?: if (vrEnabled) RENDERER_QUEST_MOBILEGLUES else RENDERER_NGGL4ES
     }
 
 }

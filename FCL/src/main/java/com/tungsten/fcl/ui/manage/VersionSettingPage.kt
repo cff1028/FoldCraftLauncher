@@ -2,12 +2,14 @@ package com.tungsten.fcl.ui.manage
 
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
+import android.text.InputType
 import android.view.View
 import android.widget.Toast
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.mio.device.VulkanCheckManager
+import com.mio.manager.RendererManager
 import com.mio.plugin.DriverPlugin.driverList
 import com.mio.plugin.DriverPlugin.selected
 import com.mio.ui.adapter.SpacingItemDecoration
@@ -30,6 +32,10 @@ import com.tungsten.fcl.setting.VersionSetting
 import com.tungsten.fcl.ui.UIManager
 import com.tungsten.fcl.ui.manage.ManageUI.VersionLoadable
 import com.tungsten.fcl.util.WeakListenerHolder
+import com.tungsten.fcl.vr.VivecraftInspector
+import com.tungsten.fcl.vr.QuestVivecraftTargets
+import com.tungsten.fcl.vr.QuestVrGraphicsSettings
+import com.tungsten.fcl.vr.VrWarnings
 import com.tungsten.fclauncher.utils.FCLPath
 import com.tungsten.fclcore.event.Event
 import com.tungsten.fclcore.fakefx.beans.property.BooleanProperty
@@ -44,11 +50,14 @@ import com.tungsten.fclcore.util.Logging
 import com.tungsten.fclcore.util.io.FileUtils
 import com.tungsten.fclcore.util.platform.MemoryUtils
 import com.tungsten.fcllibrary.component.dialog.FCLAlertDialog
+import com.tungsten.fcllibrary.component.dialog.EditDialog
 import com.tungsten.fcllibrary.component.dialog.FullEditDialog
 import com.tungsten.fcllibrary.component.theme.ThemeEngine
 import com.tungsten.fcllibrary.component.ui.FCLPage
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.util.logging.Level
@@ -75,6 +84,8 @@ class VersionSettingPage(
     private var settingsChangeListener: Runnable? = null
     private var lastIsolateGameDir = true
     private var profileCollectJob: Job? = null
+    private var vrGraphicsJob: Job? = null
+    private var vrGraphicsGeneration = 0
     private var profileVersionListener: Runnable? = null
     private val selectedVersion: StringProperty = SimpleStringProperty()
     private val enableSpecificSettings: BooleanProperty = SimpleBooleanProperty(false)
@@ -121,6 +132,8 @@ class VersionSettingPage(
 
             override fun onViewDetachedFromWindow(v: View) {
                 profileCollectJob?.cancel()
+                vrGraphicsJob?.cancel()
+                vrGraphicsGeneration++
                 // 移除挂到单例上的监听，避免页面销毁后仍被回调
                 // （attach 时 collect 立即发射当前值，会重新 loadVersion 注册）
                 profileVersionListener?.let {
@@ -183,6 +196,7 @@ class VersionSettingPage(
             if (id == ManageUI.PAGE_ID_MANAGE_SETTING && lastIsolateGameDir != versionSetting.isIsolateGameDir) {
                 lastIsolateGameDir = versionSetting.isIsolateGameDir
                 UIManager.instance.manageUI.onRunDirectoryChange(profile, versionId)
+                loadVrGraphicsSettings()
             }
             // usesGlobal 同步仅对特定版本页有意义；全局页恒显示全部设置项，
             // 若不跳过，每次输入都会触发全量重建列表导致输入框失焦
@@ -219,6 +233,7 @@ class VersionSettingPage(
         if (versionId != null) enableSpecificSettings.set(!versionSetting.isUsesGlobal)
 
         lastVersionSetting = versionSetting
+        adapter.setVrGraphicsSettings(null)
         adapter.update(
             versionSetting,
             modpack.get(),
@@ -230,6 +245,54 @@ class VersionSettingPage(
         }
         loadIcon()
         loadVulkanCheckSummary()
+        loadVrGraphicsSettings()
+    }
+
+    private fun loadVrGraphicsSettings() {
+        vrGraphicsJob?.cancel()
+        val generation = ++vrGraphicsGeneration
+        adapter.setVrGraphicsSettings(null)
+        val targetVersion = versionId ?: return
+        val targetProfile = profile
+        val targetSetting = lastVersionSetting
+        if (globalSetting || !targetSetting.isVrEnabled) return
+        val gameDirectory = targetProfile.repository.getRunDirectory(targetVersion).toPath()
+        vrGraphicsJob = activity.lifecycleScope.launch {
+            val graphics = withContext(Dispatchers.IO) {
+                try {
+                    QuestVrGraphicsSettings.read(gameDirectory)
+                } catch (failure: IOException) {
+                    Logging.LOG.log(Level.WARNING, "Cannot read instance VR graphics settings", failure)
+                    QuestVrGraphicsSettings.defaults()
+                }
+            }
+            if (generation == vrGraphicsGeneration && profile === targetProfile &&
+                versionId == targetVersion && lastVersionSetting === targetSetting && targetSetting.isVrEnabled) {
+                adapter.setVrGraphicsSettings(graphics)
+            }
+        }
+    }
+
+    private fun editVrRenderScale() {
+        if (globalSetting || !lastVersionSetting.isVrEnabled) return
+        val currentScale = adapter.vrRenderScalePercent() ?: return
+        val targetSetting = lastVersionSetting
+        val dialog = EditDialog(context, currentScale.toString()) { }
+        dialog.setTitle(R.string.settings_vr_render_scale)
+        dialog.getEditText().inputType = InputType.TYPE_CLASS_NUMBER
+        dialog.getEditText().hint = context.getString(R.string.settings_vr_render_scale_range)
+        dialog.binding.positive.setOnClickListener {
+            val percent = dialog.getEditText().text.toString().trim().toIntOrNull()
+            if (percent == null || percent !in QuestVrGraphicsSettings.MIN_RENDER_SCALE_PERCENT..
+                    QuestVrGraphicsSettings.MAX_RENDER_SCALE_PERCENT) {
+                dialog.getEditText().error = context.getString(R.string.settings_vr_render_scale_range)
+            } else {
+                targetSetting.vrRenderScalePercent = percent
+                if (lastVersionSetting === targetSetting) adapter.refreshRow(VersionSettingTag.EDIT_VR_RENDER_SCALE)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
     }
 
     /** 读取检测缓存，刷新「检测 Vulkan」行的摘要展示 */
@@ -364,7 +427,7 @@ class VersionSettingPage(
             }
 
             VersionSettingTag.EDIT_RENDERER -> {
-                RendererSelectDialog(context, globalSetting) {
+                RendererSelectDialog(context, globalSetting, lastVersionSetting) {
                     if (globalSetting && !getSelectedProfile().versionSetting.isUsesGlobal) {
                         val builder = FCLAlertDialog.Builder(context)
                         builder.setAlertLevel(FCLAlertDialog.AlertLevel.INFO)
@@ -408,6 +471,8 @@ class VersionSettingPage(
 
             VersionSettingTag.EDIT_VULKAN_CHECK -> checkVulkan()
 
+            VersionSettingTag.EDIT_VR_RENDER_SCALE -> editVrRenderScale()
+
             VersionSettingTag.EDIT_ENV -> {
                 val preferences = context.getSharedPreferences("launcher", MODE_PRIVATE)
                 val dialog = FullEditDialog(context, true) {
@@ -433,7 +498,14 @@ class VersionSettingPage(
                 // because versionSettings can be the global one.
                 // global versionSettings.usesGlobal is always true.
                 if (checked) profile.repository.specializeVersionSetting(versionId)
-                else profile.repository.globalizeVersionSetting(versionId)
+                else {
+                    if (lastVersionSetting.isVrEnabled) {
+                        lastVersionSetting.renderer = RendererManager.getRendererForMode(
+                            lastVersionSetting.nonVrRenderer, false
+                        ).id
+                    }
+                    profile.repository.globalizeVersionSetting(versionId)
+                }
                 Schedulers.androidUIThread().execute { loadVersion(profile, versionId) }
             }
 
@@ -455,6 +527,41 @@ class VersionSettingPage(
                     enableSpecificSettings.get(),
                     usedMemory.get()
                 )
+            }
+
+            VersionSettingTag.VR -> {
+                val currentVersionId = versionId ?: return
+                if (globalSetting) return
+                val instanceSetting = profile.repository.specializeVersionSetting(currentVersionId)
+                    ?: return
+                if (checked) {
+                    if (!RendererManager.getRenderer(instanceSetting.renderer).vrOnly) {
+                        instanceSetting.nonVrRenderer = instanceSetting.renderer
+                    }
+                    instanceSetting.renderer = RendererManager.getRendererForMode(
+                        instanceSetting.renderer, true
+                    ).id
+                    instanceSetting.graphicsBackend = "opengl"
+                } else {
+                    instanceSetting.renderer = RendererManager.getRendererForMode(
+                        instanceSetting.nonVrRenderer, false
+                    ).id
+                }
+                instanceSetting.isVrEnabled = checked
+                loadVersion(profile, currentVersionId)
+                if (checked) {
+                    val instanceProfile = profile
+                    activity.lifecycleScope.launch {
+                        val (result, downloadTarget) = withContext(Dispatchers.IO) {
+                            val target = QuestVivecraftTargets.capture(instanceProfile.repository, currentVersionId)
+                            VivecraftInspector.inspect(File(target.gameDirectory, "mods")) to target
+                        }
+                        if (profile === instanceProfile && versionId == currentVersionId && instanceSetting.isVrEnabled &&
+                            result != VivecraftInspector.Status.COMPATIBLE) {
+                            VrWarnings.show(context, result, downloadTarget, null)
+                        }
+                    }
+                }
             }
 
             else -> {}

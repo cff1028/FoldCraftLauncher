@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name_import">Modpack indir</string>
+    <string name="app_name_import">FCL Quest VR · Modpack indir</string>
     <string name="splash_agreement">FCL oyun dosyalarını okuması ve yönetmesi için depolama izni zorunludur. FCL github\'da tamamen açık kaynakdır, bu nedenle verilerinizin güvenliği konusunda endişelenmenize gerek yok. Bu izin yalnızca oyunun düzgün çalışması içindir ve herhangi bir güvenlik riski oluşturmaz.</string>
     <string name="splash_permission_msg">Depolama izni yok, lütfen Fold Craft Launcher\'a depolama izni verin.</string>
     <string name="splash_permission_grant">İzin ver</string>

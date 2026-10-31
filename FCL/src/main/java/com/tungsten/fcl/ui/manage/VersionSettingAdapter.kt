@@ -21,6 +21,7 @@ import com.tungsten.fcl.databinding.ItemVersionSettingValueBinding
 import com.tungsten.fcl.game.FCLGameRepository
 import com.tungsten.fcl.setting.Controllers
 import com.tungsten.fcl.setting.VersionSetting
+import com.tungsten.fcl.vr.QuestVrGraphicsSettings
 import com.tungsten.fcl.ui.setting.SettingGroup
 import com.tungsten.fclcore.util.platform.MemoryUtils
 import com.tungsten.fcllibrary.component.theme.ThemeEngine
@@ -31,6 +32,8 @@ enum class VersionSettingTag {
     // 特殊开关行
     SPECIAL,
     VULKAN,
+    VR,
+    VR_FSAA,
 
     // 按钮行
     EDIT_ICON,
@@ -46,6 +49,7 @@ enum class VersionSettingTag {
     INSTALL_DRIVER,
     EDIT_VULKAN_CHECK,
     EDIT_ENV,
+    EDIT_VR_RENDER_SCALE,
 
     // 编辑行
     JVM_ARGS,
@@ -86,6 +90,19 @@ class VersionSettingAdapter(
 
     /** 检测入口行展示的缓存摘要（Vulkan 版本或"未检测"），由页面按需更新 */
     var vulkanCheckSummary: String = ""
+
+    private var vrGraphicsSettings: QuestVrGraphicsSettings? = null
+
+    fun setVrGraphicsSettings(settings: QuestVrGraphicsSettings?) {
+        vrGraphicsSettings = settings
+        if (!::versionSetting.isInitialized) return
+        rows = buildRows()
+        refreshRow(VersionSettingTag.EDIT_VR_RENDER_SCALE)
+        refreshRow(VersionSettingTag.VR_FSAA)
+    }
+
+    fun vrRenderScalePercent(): Int? =
+        versionSetting.vrRenderScalePercent ?: vrGraphicsSettings?.renderScalePercent
 
     /** 版本/状态变化时全量重建行列表 */
     fun update(
@@ -131,6 +148,35 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_type_special_enable_desc,
             )
             result += Row.IconRow(R.string.settings_icon_desc)
+            result += Row.SwitchRow(
+                labelRes = R.string.settings_vr_enable,
+                value = { versionSetting.isVrEnabled },
+                onToggle = { listener.onSpecialSwitch(VersionSettingTag.VR, it) },
+                rowTag = VersionSettingTag.VR,
+                descriptionRes = R.string.settings_vr_enable_desc,
+                group = SettingGroup.Render
+            )
+            if (versionSetting.isVrEnabled) {
+                result += Row.ValueRow(
+                    R.string.settings_vr_render_scale,
+                    { vrRenderScalePercent()?.let { "$it%" }
+                        ?: context.getString(R.string.settings_vr_graphics_loading) },
+                    VersionSettingTag.EDIT_VR_RENDER_SCALE,
+                    null,
+                    descriptionRes = R.string.settings_vr_render_scale_desc,
+                    group = SettingGroup.Render,
+                    disabled = vrRenderScalePercent() == null,
+                )
+                result += Row.SwitchRow(
+                    R.string.settings_vr_fsaa,
+                    { versionSetting.vrFsaaEnabled ?: vrGraphicsSettings?.isFsaaEnabled ?: false },
+                    { versionSetting.vrFsaaEnabled = it },
+                    disabled = versionSetting.vrFsaaEnabled == null && vrGraphicsSettings == null,
+                    rowTag = VersionSettingTag.VR_FSAA,
+                    descriptionRes = R.string.settings_vr_fsaa_desc,
+                    group = SettingGroup.Render,
+                )
+            }
         }
         if (globalSetting || enableSpecific) {
             result += Row.ValueRow(
@@ -166,7 +212,7 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_fcl_controller_desc,
                 group = SettingGroup.Common
             )
-            result += Row.ValueRow(
+            if (!versionSetting.isVrEnabled) result += Row.ValueRow(
                 R.string.settings_fcl_graphics_backend,
                 { versionSetting.graphicsBackend },
                 VersionSettingTag.EDIT_BACKEND,
@@ -178,43 +224,45 @@ class VersionSettingAdapter(
                 R.string.settings_fcl_renderer,
                 { rendererText() },
                 VersionSettingTag.EDIT_RENDERER,
-                VersionSettingTag.INSTALL_RENDERER,
+                if (versionSetting.isVrEnabled) null else VersionSettingTag.INSTALL_RENDERER,
                 descriptionRes = R.string.settings_fcl_renderer_desc,
                 group = SettingGroup.Render,
             )
-            result += Row.SwitchRow(
-                R.string.settings_fcl_vulkan_driver_system,
-                { versionSetting.isVKDriverSystem },
-                { listener.onSpecialSwitch(VersionSettingTag.VULKAN, it) },
-                rowTag = VersionSettingTag.VULKAN,
-                descriptionRes = R.string.settings_fcl_vulkan_driver_system_desc,
-                group = SettingGroup.Render,
-            )
-            if (!versionSetting.isVKDriverSystem) {
+            if (!versionSetting.isVrEnabled) {
+                result += Row.SwitchRow(
+                    R.string.settings_fcl_vulkan_driver_system,
+                    { versionSetting.isVKDriverSystem },
+                    { listener.onSpecialSwitch(VersionSettingTag.VULKAN, it) },
+                    rowTag = VersionSettingTag.VULKAN,
+                    descriptionRes = R.string.settings_fcl_vulkan_driver_system_desc,
+                    group = SettingGroup.Render,
+                )
+                if (!versionSetting.isVKDriverSystem) {
+                    result += Row.ValueRow(
+                        R.string.settings_fcl_driver,
+                        { versionSetting.driver },
+                        VersionSettingTag.EDIT_DRIVER,
+                        VersionSettingTag.INSTALL_DRIVER,
+                        descriptionRes = R.string.settings_fcl_driver_desc,
+                        group = SettingGroup.Render,
+                    )
+                }
                 result += Row.ValueRow(
-                    R.string.settings_fcl_driver,
-                    { versionSetting.driver },
-                    VersionSettingTag.EDIT_DRIVER,
-                    VersionSettingTag.INSTALL_DRIVER,
-                    descriptionRes = R.string.settings_fcl_driver_desc,
+                    R.string.settings_fcl_vulkan_check,
+                    { vulkanCheckSummary },
+                    VersionSettingTag.EDIT_VULKAN_CHECK,
+                    null,
+                    descriptionRes = R.string.settings_fcl_vulkan_check_desc,
+                    group = SettingGroup.Render,
+                )
+                result += Row.SwitchRow(
+                    R.string.settings_fcl_vulkan_check_disable,
+                    { versionSetting.isNotCheckVulkan },
+                    { versionSetting.isNotCheckVulkan = it },
+                    descriptionRes = R.string.settings_fcl_vulkan_check_disable_desc,
                     group = SettingGroup.Render,
                 )
             }
-            result += Row.ValueRow(
-                R.string.settings_fcl_vulkan_check,
-                { vulkanCheckSummary },
-                VersionSettingTag.EDIT_VULKAN_CHECK,
-                null,
-                descriptionRes = R.string.settings_fcl_vulkan_check_desc,
-                group = SettingGroup.Render,
-            )
-            result += Row.SwitchRow(
-                R.string.settings_fcl_vulkan_check_disable,
-                { versionSetting.isNotCheckVulkan },
-                { versionSetting.isNotCheckVulkan = it },
-                descriptionRes = R.string.settings_fcl_vulkan_check_disable_desc,
-                group = SettingGroup.Render,
-            )
             result += Row.SwitchRow(
                 R.string.settings_advanced_dont_check_game_completeness,
                 { versionSetting.isNotCheckGame },
@@ -300,7 +348,8 @@ class VersionSettingAdapter(
             val editTag: VersionSettingTag?,
             val installTag: VersionSettingTag?,
             override val descriptionRes: Int = 0,
-            override val group: SettingGroup? = null
+            override val group: SettingGroup? = null,
+            val disabled: Boolean = false
         ) : Row() {
             override val rowTag: VersionSettingTag? get() = editTag
         }
@@ -415,6 +464,7 @@ class VersionSettingAdapter(
         binding.label.text = context.getString(row.labelRes)
         binding.value.text = row.value()
         binding.buttonEdit.visibility = if (row.editTag != null) View.VISIBLE else View.GONE
+        binding.buttonEdit.isEnabled = !row.disabled
         binding.buttonInstall.visibility = if (row.installTag != null) View.VISIBLE else View.GONE
         binding.buttonEdit.setOnClickListener { row.editTag?.let { listener.onButtonClick(it) } }
         binding.buttonInstall.setOnClickListener { row.installTag?.let { listener.onButtonClick(it) } }

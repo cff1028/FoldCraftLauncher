@@ -141,6 +141,7 @@ add_library(
     egl_bridge.c
     ctxbridges/loader_dlopen.c
     ctxbridges/gl_bridge.c
+    questvr/quest_vr.c
     ctxbridges/osm_bridge.c
     ctxbridges/egl_loader.c
     ctxbridges/osmesa_loader.c
@@ -177,17 +178,20 @@ target_link_libraries(
         dl
         android
         bytehook::bytehook
+        EGL
+        GLESv3
 )
 
-# 仅在arm64-v8a架构下链接EGL和GLESv2
-if (${ANDROID_ABI} STREQUAL "arm64-v8a")
-    target_link_libraries(
-            pojavexec
-            PRIVATE
-            EGL
-            GLESv2
-    )
-endif ()
+add_library(vloader SHARED questvr/vloader.c)
+target_link_libraries(vloader PRIVATE dl log)
+target_link_libraries(pojavexec PRIVATE vloader)
+
+add_library(quest_openxr SHARED questvr/openxr_adapter.c)
+target_link_libraries(quest_openxr PRIVATE vloader EGL GLESv3 log dl)
+
+add_library(quest_mobileglues SHARED questvr/mobileglues_adapter.c)
+target_link_libraries(quest_mobileglues PRIVATE vloader log dl)
+
 
 # 模块：vulkan_check - Vulkan 设备能力检测
 # dlopen 系统 libvulkan 或经 liblinkerhook 加载自定义驱动后枚举物理设备，

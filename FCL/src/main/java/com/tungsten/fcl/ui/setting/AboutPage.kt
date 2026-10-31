@@ -192,7 +192,7 @@ class AboutPage(context: Context?, id: Int) : FCLPage(context, id, R.layout.page
             LinkItem(R.string.community_discord, "https://discord.gg/ffhvuXTwyV"),
             LinkItem(R.string.community_qq, null),
             LinkItem(R.string.about_sponsor, "https://afdian.com/@tungs"),
-            LinkItem(R.string.about_source, "https://github.com/FCL-Team/FoldCraftLauncher"),
+            LinkItem(R.string.about_source, "https://github.com/cff1028/FoldCraftLauncher"),
             LinkItem(R.string.legal_eula, null, LegalAgreement.Document.EULA),
             LinkItem(R.string.legal_privacy, null, LegalAgreement.Document.PRIVACY_POLICY)
         )

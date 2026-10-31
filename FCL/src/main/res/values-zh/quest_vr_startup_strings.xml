@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="qv_start_restore_failed">无法恢复游戏启动信息，请返回 FCL 重新启动该实例。</string>
+    <string name="qv_start_title">FCL Quest VR</string>
+    <string name="qv_start_loading">正在启动 Minecraft…</string>
+    <string name="qv_start_mods">正在加载 Minecraft 和模组…</string>
+    <string name="qv_start_resources">正在加载游戏资源…</string>
+    <string name="qv_start_switching">正在进入 VR…</string>
+    <string name="qv_start_elapsed">已等待 %1$d 秒</string>
+    <string name="qv_start_hint">游戏加载期间会保留此窗口。游戏开始初始化 VR 时，会自动切换到沉浸式画面。</string>
+    <string name="qv_start_show_log">查看启动日志</string>
+    <string name="qv_start_hide_log">收起启动日志</string>
+    <string name="qv_start_latest_log">跳到最新</string>
+    <string name="qv_start_cancel">停止启动</string>
+    <string name="qv_start_cancel_message">结束本次游戏启动并关闭启动器？实例文件和设置会保留。</string>
+</resources>

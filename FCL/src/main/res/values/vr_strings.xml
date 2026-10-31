@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_renderer_mobileglues">MobileGlues 2.0.0 (OpenGL 4.0, 1.17+)</string>
+    <string name="settings_vr_enable">Quest VR (Quest 3 preview)</string>
+    <string name="settings_vr_enable_desc">Enable immersive VR for this instance only. Uses separate instance settings and an adapted OpenGL renderer. Requires the QuestCraft Android/OpenXR build of Vivecraft for the same Minecraft version.</string>
+    <string name="settings_vr_renderer_mobileglues">MobileGlues 2.0.0 - VR</string>
+    <string name="settings_vr_requirements_title">Vivecraft required for Quest VR</string>
+    <string name="settings_vr_vivecraft_missing">This instance has no active Vivecraft mod. Install the QuestCraft Android/OpenXR build matching its Minecraft version and mod loader, then start again. VR launch is blocked until a compatible build is installed.</string>
+    <string name="settings_vr_vivecraft_incompatible">This instance has a desktop Vivecraft build. It does not contain the Android/OpenXR loader required by Quest VR. Replace it with the matching QuestCraft Vivecraft build before starting VR.</string>
+    <string name="settings_vr_vivecraft_conflict">More than one active Vivecraft jar was found. Keep only the QuestCraft Android/OpenXR build matching this instance. Duplicate Vivecraft mods cannot be launched in VR.</string>
+    <string name="settings_vr_vivecraft_scan_failed">The active mods could not be inspected. Check storage access and damaged jar files, then try again. VR launch is blocked until the Android/OpenXR Vivecraft build can be verified.</string>
+    <string name="settings_vr_vivecraft_download">QuestCraft Vivecraft releases</string>
+</resources>

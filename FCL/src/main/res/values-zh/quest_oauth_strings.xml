@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quest_oauth_client_title">微软公共应用 Client ID</string>
+    <string name="quest_oauth_client_hint">公共应用（客户端）ID</string>
+    <string name="quest_oauth_client_description">源码预览版需配置公共应用 Client ID 才能使用微软登录。请填写已获准使用 Minecraft 身份验证、且已启用公共客户端设备代码流程的应用 ID。这不是密码或客户端密钥。留空使用构建默认值。修改后需重新登录微软账号。</string>
+    <string name="quest_oauth_client_required">此源码预览版尚未配置微软公共应用 Client ID。请前往“设置 → 启动器设置 → 微软公共应用 Client ID”填写后重新登录。也可使用现有离线账号测试 VR。</string>
+</resources>

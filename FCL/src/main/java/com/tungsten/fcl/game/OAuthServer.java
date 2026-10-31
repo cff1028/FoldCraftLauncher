@@ -17,6 +17,8 @@
  */
 package com.tungsten.fcl.game;
 
+import android.content.Context;
+
 import static com.tungsten.fclcore.util.Lang.mapOf;
 import static com.tungsten.fclcore.util.Lang.thread;
 
@@ -42,6 +44,7 @@ import java.util.logging.Level;
 import fi.iki.elonen.NanoHTTPD;
 
 public final class OAuthServer extends NanoHTTPD implements OAuth.Session {
+    public static final String PUBLIC_CLIENT_ID_PREFERENCE = "microsoftOAuthClientId";
     private final int port;
     private final CompletableFuture<String> future = new CompletableFuture<>();
 
@@ -130,9 +133,7 @@ public final class OAuthServer extends NanoHTTPD implements OAuth.Session {
 
         @Override
         public OAuth.Session startServer() throws IOException, AuthenticationException {
-            if (StringUtils.isBlank(getClientId()) || getClientId().equals("null")) {
-                throw new MicrosoftAuthenticationNotSupportedException();
-            }
+            validateClient();
 
             IOException exception = null;
             for (int port : new int[]{29111, 29112, 29113, 29114, 29115}) {
@@ -167,7 +168,21 @@ public final class OAuthServer extends NanoHTTPD implements OAuth.Session {
 
         @Override
         public String getClientId() {
-            return FCLApp.getAppContext().getString(R.string.oauth_api_key);
+            Context context = FCLApp.getAppContext();
+            String configured = context.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+                    .getString(PUBLIC_CLIENT_ID_PREFERENCE, "");
+            if (!StringUtils.isBlank(configured) && !"null".equalsIgnoreCase(configured.trim())) {
+                return configured.trim();
+            }
+            return context.getString(R.string.oauth_api_key).trim();
+        }
+
+        @Override
+        public void validateClient() throws AuthenticationException {
+            String clientId = getClientId();
+            if (StringUtils.isBlank(clientId) || "null".equalsIgnoreCase(clientId)) {
+                throw new MicrosoftAuthenticationNotSupportedException();
+            }
         }
 
         @Override

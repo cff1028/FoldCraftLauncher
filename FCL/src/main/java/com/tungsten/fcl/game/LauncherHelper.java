@@ -46,6 +46,8 @@ import com.tungsten.fcl.FCLApp;
 import com.tungsten.fcl.R;
 import com.tungsten.fcl.activity.JVMActivity;
 import com.tungsten.fcl.activity.MainActivity;
+import com.tungsten.fcl.activity.QuestVrLoadingActivity;
+import com.tungsten.fcl.vr.QuestGameBootstrap;
 import com.tungsten.fcl.control.MenuType;
 import com.tungsten.fcl.setting.GameOption;
 import com.tungsten.fcl.setting.MenuSetting;
@@ -56,6 +58,10 @@ import com.tungsten.fcl.ui.TaskDialog;
 import com.tungsten.fcl.ui.UIManager;
 import com.tungsten.fcl.util.JnaNatives;
 import com.tungsten.fcl.util.TaskCancellationAction;
+import com.tungsten.fcl.vr.VivecraftInspector;
+import com.tungsten.fcl.vr.QuestVivecraftTarget;
+import com.tungsten.fcl.vr.QuestVivecraftTargets;
+import com.tungsten.fcl.vr.VrWarnings;
 import com.tungsten.fclauncher.bridge.FCLBridge;
 import com.tungsten.fclauncher.utils.FCLPath;
 import com.tungsten.fclcore.auth.Account;
@@ -140,6 +146,7 @@ public final class LauncherHelper {
     }
 
     public void launch() {
+        if (setting.isVrEnabled() && QuestGameBootstrap.resumeRunningGame(context)) return;
         LOG.info("Launching game version: " + selectedVersion);
 
         launchingStepsPane.show();
@@ -155,6 +162,9 @@ public final class LauncherHelper {
 
     private void launch0() {
         FCLGameRepository repository = profile.getRepository();
+        Renderer launchRenderer = RendererManager.getRendererForMode(setting.getRenderer(), setting.isVrEnabled());
+        setting.setRenderer(launchRenderer.getId());
+        if (setting.isVrEnabled()) setting.setGraphicsBackend("opengl");
         DefaultDependencyManager dependencyManager = profile.getDependency();
         AtomicReference<Version> version = new AtomicReference<>();
         AtomicReference<List<LocalModFile>> scannedModsRef = new AtomicReference<>();
@@ -178,6 +188,7 @@ public final class LauncherHelper {
                     integrityCheckRef.set(repository.unmarkVersionLaunchedAbnormally(selectedVersion));
                     return null;
                 }).withStage("launch.state.mods")
+                .thenComposeAsync(() -> checkVrRequirements(repository))
                 .thenComposeAsync(() -> checkGameState(context, setting, version.get()))
                 .thenComposeAsync(javaVersion -> {
                     javaVersionRef.set(Objects.requireNonNull(javaVersion));
@@ -248,6 +259,8 @@ public final class LauncherHelper {
                                     authInfo,
                                     launchOptions
                             );
+                            launcher.setVrEnabled(setting.isVrEnabled());
+                            launcher.setVrGraphicsSettings(setting.getVrRenderScalePercent(), setting.getVrFsaaEnabled());
                             String jnaVersion = null;
                             String lwjglVersion = null;
                             VersionNumber lwjglMax = null;
@@ -280,6 +293,8 @@ public final class LauncherHelper {
                         .thenComposeAsync(fclBridge -> {
                             Renderer renderer = RendererManager.getRenderer(repository.getVersionSetting(selectedVersion).getRenderer());
                             fclBridge.setRenderer(renderer.getName());
+                            fclBridge.setVrEnabled(setting.isVrEnabled());
+                            fclBridge.setVrRendererId(renderer.getId());
                             return checkRenderer(fclBridge, renderer, repository.getGameVersion(selectedVersion).orElse(""), scannedModsRef.get());
                         }).thenComposeAsync(fclBridge -> checkNativeLibPlugin(fclBridge, repository.getGameVersion(selectedVersion).orElse("")))
                         .thenComposeAsync(fclBridge -> {
@@ -296,24 +311,42 @@ public final class LauncherHelper {
                             gameOption.save();
                             return Task.completed(fclBridge);
                         }).thenAcceptAsync(fclBridge -> Schedulers.androidUIThread().execute(() -> {
-                            CallbackBridge.nativeSetUseInputStackQueue(version.get().getArguments().isPresent());
-                            Intent intent = new Intent(context, JVMActivity.class);
+                            if (!setting.isVrEnabled())
+                                CallbackBridge.nativeSetUseInputStackQueue(version.get().getArguments().isPresent());
+                            Intent intent = new Intent(context,
+                                    setting.isVrEnabled() ? QuestVrLoadingActivity.class : JVMActivity.class);
                             fclBridge.setScaleFactor(scaleFactor);
                             fclBridge.setController(repository.getVersionSetting(selectedVersion).getController());
                             fclBridge.setGameDir(repository.getRunDirectory(selectedVersion).getAbsolutePath());
                             fclBridge.setJava(Integer.toString(javaVersionRef.get().getVersion()));
-                            JVMActivity.setFCLBridge(fclBridge, MenuType.GAME);
+                            if (setting.isVrEnabled()) {
+                                try {
+                                    QuestGameBootstrap.attachLaunch(context, intent, fclBridge,
+                                            version.get().getArguments().isPresent());
+                                } catch (IOException failure) {
+                                    showLaunchErrorMessage(failure);
+                                    return;
+                                }
+                            } else JVMActivity.setFCLBridge(fclBridge, MenuType.GAME);
                             Bundle bundle = new Bundle();
                             bundle.putString("controller", repository.getVersionSetting(selectedVersion).getController());
                             bundle.putString("TERRACOTTA_PLAYER", account.getUsername());
                             intent.putExtras(bundle);
                             LOG.log(Level.INFO, "Start JVMActivity!");
-                            context.startActivity(intent);
+                            try {
+                                if (setting.isVrEnabled())
+                                    QuestGameBootstrap.startLaunch(context, intent, this::showLaunchErrorMessage);
+                                else context.startActivity(intent);
+                            } catch (RuntimeException failure) {
+                                if (setting.isVrEnabled()) QuestGameBootstrap.discardLaunch(context, intent);
+                                showLaunchErrorMessage(failure);
+                                return;
+                            }
                             if (MainActivity.getInstance().shouldPlayVideo()) {
                                 MainActivity.getInstance().setMediaPlayer(null);
                                 MainActivity.getInstance().binding.videoView.stopPlayback();
                             }
-                            if (context.getSharedPreferences("launcher", MODE_PRIVATE).getBoolean("autoExitLauncher", false)) {
+                            if (!setting.isVrEnabled() && context.getSharedPreferences("launcher", MODE_PRIVATE).getBoolean("autoExitLauncher", false)) {
                                 Activity activity = FCLApp.getActivity();
                                 if (activity != null)
                                     activity.finish();
@@ -446,6 +479,20 @@ public final class LauncherHelper {
             LOG.log(Level.WARNING, "Failed to scan mods before launch", e);
             return null;
         }
+    }
+
+    private Task<Void> checkVrRequirements(FCLGameRepository repository) {
+        return Task.composeAsync(() -> {
+            if (!setting.isVrEnabled()) return Task.completed(null);
+            VivecraftInspector.Status status = VivecraftInspector.inspect(
+                    new File(repository.getRunDirectory(selectedVersion), "mods"));
+            if (status == VivecraftInspector.Status.COMPATIBLE) return Task.completed(null);
+            QuestVivecraftTarget target = QuestVivecraftTargets.capture(repository, selectedVersion);
+            CompletableFuture<Void> blocked = new CompletableFuture<>();
+            Schedulers.androidUIThread().execute(() -> VrWarnings.show(context, status, target,
+                    () -> blocked.completeExceptionally(new CancellationException("Quest VR: " + status))));
+            return Task.fromCompletableFuture(blocked);
+        });
     }
 
     private Task<FCLBridge> checkRenderer(FCLBridge bridge, Renderer renderer, String version, List<LocalModFile> mods) {

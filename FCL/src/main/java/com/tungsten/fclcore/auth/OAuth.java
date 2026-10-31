@@ -55,6 +55,7 @@ public class OAuth {
     }
 
     public Result authenticate(GrantFlow grantFlow, Options options) throws AuthenticationException {
+        options.callback.validateClient();
         try {
             switch (grantFlow) {
                 case AUTHORIZATION_CODE:
@@ -161,6 +162,7 @@ public class OAuth {
     }
 
     public Result refresh(String refreshToken, Options options) throws AuthenticationException {
+        options.callback.validateClient();
         try {
             Map<String, String> query = mapOf(pair("client_id", options.callback.getClientId()),
                     pair("refresh_token", refreshToken),
@@ -239,6 +241,9 @@ public class OAuth {
     }
 
     public interface Callback {
+        default void validateClient() throws AuthenticationException {
+        }
+
         /**
          * Start OAuth callback server at localhost.
          *

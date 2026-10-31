@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_renderer_mobileglues">MobileGlues 2.0.0 (OpenGL 4.0, 1.17+)</string>
+    <string name="settings_vr_enable">Quest VR（Quest 3 测试版）</string>
+    <string name="settings_vr_enable_desc">仅为此游戏实例开启沉浸式 VR，同时启用独立实例设置和已适配的 OpenGL 渲染器。需要安装与 Minecraft 版本匹配的 QuestCraft Android/OpenXR 版 Vivecraft。</string>
+    <string name="settings_vr_renderer_mobileglues">MobileGlues 2.0.0 - VR</string>
+    <string name="settings_vr_requirements_title">Quest VR 需要兼容的 Vivecraft</string>
+    <string name="settings_vr_vivecraft_missing">当前实例没有已启用的 Vivecraft 模组。请安装与 Minecraft 版本及模组加载器匹配的 QuestCraft Android/OpenXR 版 Vivecraft 后再启动。兼容模组安装完成前无法启动 VR。</string>
+    <string name="settings_vr_vivecraft_incompatible">当前实例安装的是桌面版 Vivecraft，其中缺少 Quest VR 所需的 Android/OpenXR 加载器。请先替换为匹配版本的 QuestCraft Vivecraft，再启动 VR。</string>
+    <string name="settings_vr_vivecraft_conflict">检测到多个已启用的 Vivecraft JAR。请只保留与此实例匹配的 QuestCraft Android/OpenXR 版本，移除重复版本后再启动 VR。</string>
+    <string name="settings_vr_vivecraft_scan_failed">无法检查当前实例的模组文件。请检查存储访问权限及损坏的 JAR 文件后重试。确认安装了兼容的 Android/OpenXR 版 Vivecraft 前无法启动 VR。</string>
+    <string name="settings_vr_vivecraft_download">打开 QuestCraft Vivecraft 发布页</string>
+</resources>

@@ -1,0 +1,94 @@
+{
+  "description": "MobileGlues 2.0.0 shader-source submission fix for FCL Quest VR",
+  "source_change": "Shader source count/byte length, parameter/object validation, empty replacement, allocation/overflow guards, failure fallback, and context-scoped shader-submission errors. Unrelated legacy GL error policy preserved.",
+  "patched_files": [
+    {
+      "path": "gl/shader.cpp",
+      "sha256": "46795ad94ee167a5c2d0e5582c26d4c231be744df3c64bb2e5fcff8b71b8a1c6",
+      "original_sha256": "ed610b57328dce43375e9e0266c26edbe2bc26e9f90d241eea7031c28b7d090d"
+    },
+    {
+      "path": "gl/shader.h",
+      "sha256": "4f464e8386a0ed19d4012186ce9c52ba27141261fd71ce7429f53b370be06734",
+      "original_sha256": "a2b47ca7c96a6ebf60e2445e5db0003de984dd9f7e2faf0bf9c79c4628a34bb5"
+    },
+    {
+      "path": "gl/getter.cpp",
+      "sha256": "11ef0eb7113a42cbdc6894dac7cfaff65d15fe521c3543dddcf573b4980dcf8c",
+      "original_sha256": "1f7272e42e6ecfb4d601cef882295cd7167a1925a3bcc8cbd260406122c7e288"
+    },
+    {
+      "path": "egl/context.h",
+      "sha256": "91008e38a5f4dca75346e7002f8e33dedb09bc1a1d6e96fe0e500e76a861df3a",
+      "original_sha256": "4b18a5266b6dfca2c8f8d88f65b2adfd59e971d9f6a764c70f26c5ca470340b6"
+    }
+  ],
+  "sources": [
+    {
+      "name": "MobileGlues",
+      "repository": "https://github.com/MobileGL-Dev/MobileGlues",
+      "revision": "fbc4e412e353302607ba36489b2dd573b5becb25",
+      "archive_url": "https://codeload.github.com/MobileGL-Dev/MobileGlues/zip/fbc4e412e353302607ba36489b2dd573b5becb25",
+      "archive_sha256": "0c642f8e49aa098d8c1bd265a8c167ec4135024398e82d2915fd03f338842b83",
+      "source_subdirectory": "."
+    },
+    {
+      "name": "glslang",
+      "repository": "https://github.com/KhronosGroup/glslang",
+      "revision": "f5f664dee8146676b04a332a7233959fc3ce9681",
+      "archive_url": "https://codeload.github.com/KhronosGroup/glslang/zip/f5f664dee8146676b04a332a7233959fc3ce9681",
+      "archive_sha256": "17867c0c43b567b37942667a4f9326ab9ecf972266e639584ded488a3c7d0c5c",
+      "source_subdirectory": "MobileGlues-cpp/3rdparty/glslang"
+    },
+    {
+      "name": "SPIRV-Cross",
+      "repository": "https://github.com/KhronosGroup/SPIRV-Cross",
+      "revision": "a0fba56c34a6700f1724bf9b751da5b488a3775c",
+      "archive_url": "https://codeload.github.com/KhronosGroup/SPIRV-Cross/zip/a0fba56c34a6700f1724bf9b751da5b488a3775c",
+      "archive_sha256": "87d1e95e769649784f4039febb30812d07834ea025ea8e5dd6c35462b01ad618",
+      "source_subdirectory": "MobileGlues-cpp/3rdparty/SPIRV-Cross"
+    },
+    {
+      "name": "xxhash",
+      "repository": "https://github.com/stbrumme/xxhash",
+      "revision": "c2866db364b6ea3a11933e62235ddc166ba18565",
+      "archive_url": "https://codeload.github.com/stbrumme/xxhash/zip/c2866db364b6ea3a11933e62235ddc166ba18565",
+      "archive_sha256": "009fc31d6e0a3002522b653b3a884bfa5914363088bcef0290388ae074dfa338",
+      "source_subdirectory": "MobileGlues-cpp/3rdparty/xxhash"
+    },
+    {
+      "name": "ska",
+      "repository": "https://github.com/MobileGL-Dev/flat_hash_map",
+      "revision": "21c1cec95abee1beef827e4a7c95f692875d9594",
+      "archive_url": "https://codeload.github.com/MobileGL-Dev/flat_hash_map/zip/21c1cec95abee1beef827e4a7c95f692875d9594",
+      "archive_sha256": "90c561572b07fbd9022c80adedb2a58632072b82b54b798d65d399b8847b139e",
+      "source_subdirectory": "MobileGlues-cpp/include/ska"
+    }
+  ],
+  "unused_submodules": [
+    {
+      "path": "MobileGlues-cpp/3rdparty/perfetto",
+      "revision": "40b529923598b739b2892a536a7692eedbed5685",
+      "reason": "Upstream CMake sets PROFILING OFF; not compiled or linked, source omitted."
+    }
+  ],
+  "build": {
+    "ndk": "27.0.12077973",
+    "clang": "18.0.1",
+    "cmake": "3.22.1",
+    "generator": "Ninja",
+    "abi": "arm64-v8a",
+    "api_level": 21,
+    "stl": "c++_static",
+    "type": "Release",
+    "lto": "ThinLTO",
+    "CMAKE_DISABLE_FIND_PACKAGE_Git": true,
+    "SOURCE_DATE_EPOCH": "1786287886",
+    "TZ": "UTC"
+  },
+  "library": {
+    "name": "libmobileglues.so",
+    "size": 6401936,
+    "sha256": "2e3a42a22ff509520a709c9300af7c1efd2d10f91398b41d41d8088fc82c857b"
+  }
+}

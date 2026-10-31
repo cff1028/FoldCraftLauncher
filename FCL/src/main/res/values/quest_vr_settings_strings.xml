@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_vr_render_scale">VR render scale</string>
+    <string name="settings_vr_render_scale_desc">Pixel count relative to the OpenXR recommended resolution. 100% uses the recommendation; higher values improve detail at a performance cost. Changes apply on the next game launch.</string>
+    <string name="settings_vr_render_scale_range">Enter a whole percentage from 10 to 900</string>
+    <string name="settings_vr_fsaa">FSAA antialiasing</string>
+    <string name="settings_vr_fsaa_desc">Enable Vivecraft’s Lanczos resampling filter, which can be used with a render scale above 100%. Increases rendering cost; changes apply on the next game launch.</string>
+    <string name="settings_vr_graphics_loading">Loading…</string>
+    <string name="settings_quest_vr_transition_animation">Quest VR transition animation</string>
+    <string name="settings_quest_vr_transition_animation_desc">Fade between flat and VR modes. Enabled by default; changes apply the next time you launch a game.</string>
+</resources>

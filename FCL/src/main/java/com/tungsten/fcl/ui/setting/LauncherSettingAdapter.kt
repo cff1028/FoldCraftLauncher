@@ -18,8 +18,10 @@ import com.tungsten.fcl.databinding.ItemLauncherSettingSpinnerBinding
 import com.tungsten.fcl.databinding.ItemLauncherSettingThreadsBinding
 import com.tungsten.fcl.databinding.ItemVersionSettingEditBinding
 import com.tungsten.fcl.databinding.ItemVersionSettingSwitchBinding
+import com.tungsten.fcl.game.OAuthServer
 import com.tungsten.fcl.setting.ConfigHolder
 import com.tungsten.fcl.setting.DownloadProviders
+import com.tungsten.fcl.vr.QuestVrPreferences
 import com.tungsten.fcllibrary.component.theme.ThemeEngine
 import com.tungsten.fcllibrary.component.view.FCLButton
 import com.tungsten.fcllibrary.component.view.FCLImageButton
@@ -60,6 +62,7 @@ enum class LauncherSettingTag {
 
     // 开关行
     SWITCH_AUTO_EXIT,
+    SWITCH_QUEST_VR_TRANSITION_ANIMATION,
     SWITCH_IGNORE_NOTCH,
     SWITCH_CLOSE_SKIN_MODEL,
     SWITCH_DISABLE_FULLSCREEN_INPUT,
@@ -158,6 +161,13 @@ class LauncherSettingAdapter(
                 listOf(Triple(0, R.string.settings_launcher_launcher_log_export, LauncherSettingTag.EXPORT_LOG)),
                 R.string.settings_launcher_debug_desc,
             ),
+            Row.EditRow(
+                R.string.quest_oauth_client_title,
+                { prefs.getString(OAuthServer.PUBLIC_CLIENT_ID_PREFERENCE, "") ?: "" },
+                { text -> prefs.edit { putString(OAuthServer.PUBLIC_CLIENT_ID_PREFERENCE, text.trim()) } },
+                context.getString(R.string.quest_oauth_client_hint),
+                R.string.quest_oauth_client_description,
+            ),
             Row.ButtonRow(
                 R.string.settings_launcher_request_recording_permission,
                 listOf(Triple(0, R.string.settings_launcher_request, LauncherSettingTag.REQUEST_AUDIO)),
@@ -168,6 +178,12 @@ class LauncherSettingAdapter(
                 { prefs.getBoolean("autoExitLauncher", false) },
                 LauncherSettingTag.SWITCH_AUTO_EXIT,
                 R.string.settings_launcher_exit_after_launching_desc,
+            ),
+            Row.SwitchRow(
+                R.string.settings_quest_vr_transition_animation,
+                { QuestVrPreferences.isTransitionAnimationEnabled(context) },
+                LauncherSettingTag.SWITCH_QUEST_VR_TRANSITION_ANIMATION,
+                R.string.settings_quest_vr_transition_animation_desc,
             ),
             Row.SpinnerRow(
                 R.string.settings_launcher_theme_mode, themeModeList,

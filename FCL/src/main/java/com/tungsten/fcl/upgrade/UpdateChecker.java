@@ -57,6 +57,9 @@ public class UpdateChecker {
      * 版本表中没有当前版本条目（官方下架或自定义构建）时给出提示。
      */
     public Task<?> showCurrentChangelog(Context context) {
+        if (context.getPackageName().equals("com.questfcl.launcher")) {
+            return previewNotice(context, true);
+        }
         if (!changelogLoading.compareAndSet(false, true)) {
             return Task.runAsync(() -> {});
         }
@@ -84,6 +87,9 @@ public class UpdateChecker {
     }
 
     public Task<?> check(Context context, boolean showBeta, boolean showAlert) {
+        if (context.getPackageName().equals("com.questfcl.launcher")) {
+            return previewNotice(context, showAlert);
+        }
         if (!checking.compareAndSet(false, true)) {
             return Task.runAsync(() -> {});
         }
@@ -126,6 +132,15 @@ public class UpdateChecker {
             e.printStackTrace();
             throw new IllegalStateException("Can't get current version code");
         }
+    }
+
+    private Task<?> previewNotice(Context context, boolean showAlert) {
+        return Task.runAsync(() -> {
+            if (showAlert) {
+                Schedulers.androidUIThread().execute(() -> Toast.makeText(context,
+                        R.string.quest_vr_preview_updates, Toast.LENGTH_LONG).show());
+            }
+        });
     }
 
     private void showUpdateDialog(Context context, RemoteVersion version) {

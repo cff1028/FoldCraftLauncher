@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quest_oauth_client_title">Microsoft public application Client ID</string>
+    <string name="quest_oauth_client_hint">Public application (client) ID</string>
+    <string name="quest_oauth_client_description">Source preview builds need a configured public application Client ID for Microsoft sign-in. Enter an application ID approved for Minecraft authentication with public-client device code flow enabled. This is not a password or client secret. Leave blank to use the build default. Sign in to your Microsoft account again after changing it.</string>
+    <string name="quest_oauth_client_required">This source preview build has no Microsoft public application Client ID. Configure it in Settings → Launcher → Microsoft public application Client ID, then sign in again. You can use an existing offline account to test VR.</string>
+</resources>

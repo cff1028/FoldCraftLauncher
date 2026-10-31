@@ -13,6 +13,7 @@ import com.mio.util.getScreenWidth
 import com.tungsten.fcl.R
 import com.tungsten.fcl.databinding.DialogRendererSelectBinding
 import com.tungsten.fcl.setting.Profiles
+import com.tungsten.fcl.setting.VersionSetting
 import com.tungsten.fcllibrary.component.dialog.FCLDialog
 import com.tungsten.fcllibrary.util.ConvertUtils
 import java.util.function.Consumer
@@ -20,6 +21,7 @@ import java.util.function.Consumer
 class RendererSelectDialog(
     context: Context,
     val isGlobal: Boolean,
+    private val explicitVersionSetting: VersionSetting? = null,
     val callback: Consumer<String>
 ) : FCLDialog(context) {
 
@@ -36,8 +38,12 @@ class RendererSelectDialog(
         val binding = DialogRendererSelectBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.title.text = context.getString(R.string.settings_fcl_renderer)
-        val currentId = currentRendererId()
-        // 齿轮图标：内置渲染器的可配置环境变量，复用插件页同款 RendererEnvDialog
+        val versionSetting = explicitVersionSetting
+            ?: if (isGlobal) Profiles.getSelectedProfile().globalVersionSetting
+            else Profiles.getSelectedProfile().versionSetting
+        val vrEnabled = !isGlobal && versionSetting.isVrEnabled
+        val currentId = RendererManager.getRendererForMode(versionSetting.renderer, vrEnabled).id
+        val availableRenderers = RendererManager.getRenderersForMode(vrEnabled).toMutableList()
         val configCallback: (Renderer) -> Unit = { renderer ->
             val specs = RendererPlugin.builtinEnvSpecs(context, renderer.id)
             if (specs.isNotEmpty()) {
@@ -48,12 +54,10 @@ class RendererSelectDialog(
         }
         val adapter = RendererSelectItemAdapter(
             context,
-            RendererManager.rendererList,
+            availableRenderers,
             currentId,
             configCallback
         ) { renderer ->
-            val versionSetting =
-                if (isGlobal) Profiles.getSelectedProfile().globalVersionSetting else Profiles.getSelectedProfile().versionSetting
             versionSetting.renderer = renderer.id
             dismiss()
             callback.accept(renderer.des)
@@ -64,13 +68,14 @@ class RendererSelectDialog(
         )
         binding.recyclerView.adapter = adapter
         // 打开时定位到当前选中的渲染器（首次布局前调用，LayoutManager 会从该位置开始布局）
-        val selectedIndex = RendererManager.rendererList.indexOfFirst { it.id == currentId }
+        val selectedIndex = availableRenderers.indexOfFirst { it.id == currentId }
         if (selectedIndex > 0) {
             binding.recyclerView.scrollToPosition(selectedIndex)
         }
         binding.refresh.setOnClickListener {
             RendererManager.refresh(context)
-            // rendererList 是同一实例被 clear 后重填，直接全量刷新
+            availableRenderers.clear()
+            availableRenderers.addAll(RendererManager.getRenderersForMode(vrEnabled))
             adapter.notifyDataSetChanged()
         }
         binding.advanced.setOnClickListener {
@@ -81,8 +86,4 @@ class RendererSelectDialog(
         }
     }
 
-    private fun currentRendererId(): String {
-        return if (isGlobal) Profiles.getSelectedProfile().globalVersionSetting.renderer
-        else Profiles.getSelectedProfile().versionSetting.renderer
-    }
 }

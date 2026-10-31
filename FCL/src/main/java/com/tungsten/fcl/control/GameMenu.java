@@ -66,6 +66,7 @@ import com.tungsten.fcl.game.sdl.SdlBridge;
 import com.tungsten.fcl.game.sdl.SdlSettings;
 import com.tungsten.fcl.setting.Controller;
 import com.tungsten.fcl.setting.Controllers;
+import com.tungsten.fcl.vr.QuestVrSession;
 import com.tungsten.fcl.setting.GameOption;
 import com.tungsten.fcl.setting.MenuSetting;
 import com.tungsten.fclauncher.bridge.FCLBridge;
@@ -153,6 +154,7 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
     private boolean gamepadControl = true;
     private Thread fpsThread;
     private Thread memoryThread;
+    private volatile boolean sessionPanelDestroyed;
     private int lastCursorMode = FCLBridge.CursorEnabled;
 
     public void setMenuView(MenuView menuView) {
@@ -827,7 +829,8 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         });
 
         editModeProperty.set(isSimulated());
-        controllerProperty.set(Controllers.findControllerById(activity.getIntent().getExtras().getString("controller")));
+        controllerProperty.set(Controllers.findControllerById(GameLaunchMetadata.resolveController(
+                activity.getIntent(), fclBridge == null ? null : fclBridge.getController())));
         selectDefaultViewGroup();
 
         baseLayout = findViewById(R.id.base_layout);
@@ -972,7 +975,15 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
 
     @Override
     public void onPause() {
-        if (cursorModeProperty.get() == FCLBridge.CursorDisabled) {
+        pauseInput(true);
+    }
+
+    public void pauseForVrTransition() {
+        pauseInput(false);
+    }
+
+    private void pauseInput(boolean sendEscape) {
+        if (sendEscape && cursorModeProperty.get() == FCLBridge.CursorDisabled) {
             fclInput.sendKeyEvent(FCLKeycodes.KEY_ESC, true);
             fclInput.sendKeyEvent(FCLKeycodes.KEY_ESC, false);
         }
@@ -992,6 +1003,7 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
 
     @Override
     public void onGraphicOutput() {
+        Glide.with(baseLayout).clear(baseLayout);
         baseLayout.setBackground(null);
         baseLayout.removeView(launchProgress);
         if (!menuSetting.isShowLog() && menuSetting.isAutoShowLog()) {
@@ -1011,13 +1023,16 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
             // 手动捕获接管同步回归自动管理
             getInput().onCursorModeChanged();
             getInput().resetManualCaptureControl();
+            View focusView = getInput().getFocusableView();
             if (mode == FCLBridge.CursorEnabled) {
                 getCursor().setVisibility(View.VISIBLE);
                 gameItemBar.setVisibility(View.GONE);
                 getInput().setPointer(AndroidUtilKt.getScreenWidth() / 2, AndroidUtilKt.getScreenHeight() / 2, "Gyro");
                 if (menuSetting.isPhysicalMouseMode()) {
-                    getInput().getFocusableView().releasePointerCapture();
-                    getInput().getFocusableView().clearFocus();
+                    if (focusView != null) {
+                        focusView.releasePointerCapture();
+                        focusView.clearFocus();
+                    }
                 } else {
                     // 游戏退出捕获时系统可能顺带释放 pointer capture，立即补回
                     getInput().ensurePointerCapture();
@@ -1028,8 +1043,10 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
                     gameItemBar.setVisibility(View.VISIBLE);
                 }
                 if (menuSetting.isPhysicalMouseMode()) {
-                    getInput().getFocusableView().requestFocus();
-                    getInput().getFocusableView().requestPointerCapture();
+                    if (focusView != null) {
+                        focusView.requestFocus();
+                        focusView.requestPointerCapture();
+                    }
                 } else {
                     getInput().ensurePointerCapture();
                 }
@@ -1038,6 +1055,19 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
     }
 
     private boolean firstLog = true;
+
+    public void appendSessionLog(String log) {
+        logWindow.appendLog(log);
+    }
+
+    public void releaseSessionPanel() {
+        sessionPanelDestroyed = true;
+        if (fpsThread != null) fpsThread.interrupt();
+        if (memoryThread != null) memoryThread.interrupt();
+        fclInput.stopCaptureWatchdog();
+        gyroscope.disableSensor();
+        Glide.with(activity.getApplicationContext()).clear(baseLayout);
+    }
 
     @Override
     public void onLog(String log) {
@@ -1064,6 +1094,11 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
 
     @Override
     public void onExit(int exitCode) {
+        QuestVrSession session = QuestVrSession.get();
+        if (session != null) {
+            session.onExit(exitCode);
+            return;
+        }
         if (exitCode != 0 && fclBridge != null) {
             JVMCrashActivity.startCrashActivity(true, activity, exitCode, fclBridge.getLogPath());
             Logging.LOG.log(Level.INFO, "JVM crashed, start jvm crash activity to show errors now!");
@@ -1232,7 +1267,11 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
                 FCLAlertDialog.Builder builder = new FCLAlertDialog.Builder(activity);
                 builder.setAlertLevel(FCLAlertDialog.AlertLevel.ALERT);
                 builder.setMessage(activity.getString(R.string.menu_settings_force_exit_msg));
-                builder.setPositiveButton(() -> android.os.Process.killProcess(android.os.Process.myPid()));
+                builder.setPositiveButton(() -> {
+                    QuestVrSession session = QuestVrSession.get();
+                    if (session != null) session.cancel();
+                    else android.os.Process.killProcess(android.os.Process.myPid());
+                });
                 builder.setNegativeButton(null);
                 builder.setCancelable(false);
                 builder.create().show();
@@ -1550,7 +1589,7 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         if (checked) {
             fpsThread = new Thread(() -> {
                 FCLBridge.getFps();
-                while (menuSetting.isShowFps() && !Thread.currentThread().isInterrupted()) {
+                while (!sessionPanelDestroyed && menuSetting.isShowFps() && !Thread.currentThread().isInterrupted()) {
                     Schedulers.androidUIThread().execute(() -> fpsText.setText("FPS:" + FCLBridge.getFps()));
                     try {
                         Thread.sleep(1000);
@@ -1577,7 +1616,7 @@ public class GameMenu implements MenuCallback, FCLBridgeCallback {
         }
         if (checked) {
             memoryThread = new Thread(() -> {
-                while (menuSetting.isShowMemory() && !Thread.currentThread().isInterrupted()) {
+                while (!sessionPanelDestroyed && menuSetting.isShowMemory() && !Thread.currentThread().isInterrupted()) {
                     long usedMemory = AndroidUtilKt.getUsedMemory(getActivity()) / 1024 / 1024;
                     long totalMemory = AndroidUtilKt.getTotalMemory(getActivity()) / 1024 / 1024;
                     long usage;

@@ -1,0 +1,12 @@
+[
+  {
+    "file": "lwjgl-opengles.jar",
+    "bytes": 369765,
+    "sha256": "a9f291d329d8bb7206985230b850efde516492c43b3871a6d28b82c0b7810d3e"
+  },
+  {
+    "file": "lwjgl-openxr.jar",
+    "bytes": 1666399,
+    "sha256": "0b854a4d07aaa149762ef67db0dba26cfae4d8bf4e950099454445594a6817f9"
+  }
+]

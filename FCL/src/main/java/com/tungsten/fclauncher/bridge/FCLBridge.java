@@ -20,6 +20,7 @@ import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
 
 import com.tungsten.fcl.FCLApp;
+import com.tungsten.fclauncher.FCLConfig;
 import com.tungsten.fcl.control.OpenFolderDialog;
 import com.tungsten.fcl.setting.MenuSetting;
 import com.tungsten.fclauncher.keycodes.LwjglGlfwKeycode;
@@ -78,6 +79,32 @@ public class FCLBridge {
     private SurfaceTexture surfaceTexture;
     private String modSummary;
     private boolean hasTouchController = false;
+    private boolean vrEnabled;
+    private String vrRendererId;
+    private FCLConfig launchConfig;
+
+    public FCLConfig getLaunchConfig() {
+        return launchConfig;
+    }
+    public void setLaunchConfig(FCLConfig config) {
+        launchConfig = config;
+    }
+
+    public boolean isVrEnabled() {
+        return vrEnabled;
+    }
+
+    public void setVrEnabled(boolean enabled) {
+        vrEnabled = enabled;
+    }
+
+    public String getVrRendererId() {
+        return vrRendererId;
+    }
+
+    public void setVrRendererId(String rendererId) {
+        vrRendererId = rendererId;
+    }
     /** 当前实例是否安装 Cleanroom，随启动设置，execute 时同步进 CallbackBridge */
     private volatile boolean cleanroomActive = false;
 

@@ -1,0 +1,32 @@
+[
+  {
+    "repository": "https://github.com/MobileGL-Dev/SimpleFPEWrapper",
+    "revision": "ca8c6af26ca2996c3d07be90cde0e72ebf815935",
+    "archive_url": "https://codeload.github.com/MobileGL-Dev/SimpleFPEWrapper/zip/ca8c6af26ca2996c3d07be90cde0e72ebf815935",
+    "sha256": "3fdd178beb60930066eaa4b8d24488b6c60af9af215217c8bb0e46831520577f"
+  },
+  {
+    "repository": "https://github.com/KhronosGroup/SPIRV-Cross",
+    "revision": "6c09849fe88c48eaed08413aa022aaa136a3a057",
+    "archive_url": "https://codeload.github.com/KhronosGroup/SPIRV-Cross/zip/6c09849fe88c48eaed08413aa022aaa136a3a057",
+    "sha256": "6114250b398aa30d3f77840e868b1dcdf2537ecc3f70ed0a754f0907e8889d49"
+  },
+  {
+    "repository": "https://github.com/g-truc/glm",
+    "revision": "e8642318a099b9b6ff432bed8b8b90b4226a9edd",
+    "archive_url": "https://codeload.github.com/g-truc/glm/zip/e8642318a099b9b6ff432bed8b8b90b4226a9edd",
+    "sha256": "a38513618f0d1a942d04a5b071abb3d7bbcdece776fdff004ee20683602a69b4"
+  },
+  {
+    "repository": "https://github.com/KhronosGroup/glslang",
+    "revision": "cb30230f3523311d68828ae3d45430c3c20baacf",
+    "archive_url": "https://codeload.github.com/KhronosGroup/glslang/zip/cb30230f3523311d68828ae3d45430c3c20baacf",
+    "sha256": "e435bee40bf353bebc2e303a1146c6423093e52164b6ac0ac5226b8dbdfe3221"
+  },
+  {
+    "repository": "https://github.com/google/googletest",
+    "revision": "52eb8108c5bdec04579160ae17225d66034bd723",
+    "archive_url": "https://codeload.github.com/google/googletest/zip/52eb8108c5bdec04579160ae17225d66034bd723",
+    "sha256": "9a56a54ae784394ff664cd55e8f4c9a03b503ebf0cb99576321c78ab3d87ca84"
+  }
+]

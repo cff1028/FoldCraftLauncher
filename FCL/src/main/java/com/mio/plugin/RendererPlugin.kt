@@ -318,6 +318,7 @@ object RendererPlugin : AbstractPlugin<Renderer>() {
      */
     @JvmStatic
     fun isSfpewLayerEnabled(renderer: Renderer): Boolean {
+        if (renderer.vrOnly) return false
         if (fpeEmulatorModPresent) return false
         if (renderer.path.isEmpty()) {
             return renderer.id !in FPE_CAPABLE_BUILTIN_IDS

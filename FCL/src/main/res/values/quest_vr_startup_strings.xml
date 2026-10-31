@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="qv_start_restore_failed">The game launch could not be restored. Please start the instance again from FCL.</string>
+    <string name="qv_start_title">FCL Quest VR</string>
+    <string name="qv_start_loading">Starting Minecraft…</string>
+    <string name="qv_start_mods">Loading Minecraft and mods…</string>
+    <string name="qv_start_resources">Loading game resources…</string>
+    <string name="qv_start_switching">Entering VR…</string>
+    <string name="qv_start_elapsed">Elapsed: %1$d seconds</string>
+    <string name="qv_start_hint">This window stays visible while the game loads. VR opens automatically when the game starts its VR runtime.</string>
+    <string name="qv_start_show_log">Show startup log</string>
+    <string name="qv_start_hide_log">Hide startup log</string>
+    <string name="qv_start_latest_log">Jump to latest</string>
+    <string name="qv_start_cancel">Stop startup</string>
+    <string name="qv_start_cancel_message">Stop this game session and close the launcher? Your instance files and settings will be kept.</string>
+</resources>

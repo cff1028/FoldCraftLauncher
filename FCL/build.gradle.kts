@@ -40,30 +40,40 @@ android {
         localProperty = Properties()
         file("${rootDir}/local.properties").inputStream().use { localProperty.load(it) }
     }
-    val pwd = System.getenv("FCL_KEYSTORE_PASSWORD") ?: localProperty?.getProperty("pwd")
+    val signingFile = rootProject.file(".signing/signing.properties")
+    val defaultKeystore = rootProject.file(".signing/quest-fcl-preview.jks")
+    val previewSigning = Properties().apply {
+        if (signingFile.exists()) signingFile.inputStream().use { load(it) }
+    }
+    val signingEnvironment = listOf("QUEST_FCL_KEYSTORE_FILE", "QUEST_FCL_KEYSTORE_PASSWORD",
+        "QUEST_FCL_KEY_ALIAS", "QUEST_FCL_KEY_PASSWORD").associateWith(System::getenv)
+    val signingRequested = signingFile.exists() || defaultKeystore.exists() ||
+        signingEnvironment.values.any { it != null }
+    val questSigning = if (signingRequested) {
+        val keystore = signingEnvironment["QUEST_FCL_KEYSTORE_FILE"]?.let { rootProject.file(it) }
+            ?: defaultKeystore
+        val storePassword = signingEnvironment["QUEST_FCL_KEYSTORE_PASSWORD"]
+            ?: previewSigning.getProperty("storePassword")
+        val keyAlias = signingEnvironment["QUEST_FCL_KEY_ALIAS"]
+            ?: previewSigning.getProperty("keyAlias", "quest-fcl-preview")
+        val keyPassword = signingEnvironment["QUEST_FCL_KEY_PASSWORD"]
+            ?: previewSigning.getProperty("keyPassword") ?: storePassword
+        require(keystore.isFile) { "Quest signing was configured, but its keystore file is missing." }
+        require(!storePassword.isNullOrEmpty() && !keyPassword.isNullOrEmpty() && keyAlias.isNotBlank()) {
+            "Quest signing requires a store password, key password and key alias."
+        }
+        signingConfigs.create("QuestPreview") {
+            this.storeFile = keystore
+            this.storePassword = storePassword
+            this.keyAlias = keyAlias
+            this.keyPassword = keyPassword
+        }
+    } else null
     val curseApiKey = System.getenv("CURSE_API_KEY") ?: localProperty?.getProperty("curse.api.key")
     val oauthApiKey = System.getenv("OAUTH_API_KEY") ?: localProperty?.getProperty("oauth.api.key")
-    // 命令行 -Darch 优先；local.properties 仅在命令行未指定时生效
-    if (System.getProperty("arch") == null && localProperty != null && localProperty.getProperty(
-            "arch",
-            "all"
-        ) == "arm64"
-    )
-        System.setProperty("arch", "arm64")
+    System.setProperty("arch", "arm64")
 
     signingConfigs {
-        create("FCLKey") {
-            storeFile = file("../key-store.jks")
-            storePassword = pwd
-            keyAlias = "FCL-Key"
-            keyPassword = pwd
-        }
-        create("FCLDebugKey") {
-            storeFile = file("../debug-key.jks")
-            storePassword = "FCL-Debug"
-            keyAlias = "FCL-Debug"
-            keyPassword = "FCL-Debug"
-        }
         // minSdk 26 ≥ 24，v1 已无必要，统一启用 v2 + v3 签名方案
         configureEach {
             enableV1Signing = false
@@ -73,11 +83,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.tungsten.fcl"
+        applicationId = "com.questfcl.launcher"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 1343
-        versionName = "1.3.4.3"
+        versionCode = 10
+        versionName = "0.1.0-vr-preview10"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {
@@ -91,20 +101,17 @@ android {
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("FCLKey")
+            signingConfig = questSigning
         }
         getByName("debug") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("FCLKey")
+            if (questSigning != null) signingConfig = questSigning
         }
         create("fordebug") {
             initWith(getByName("debug"))
-            applicationIdSuffix = ".debug"
-            signingConfig = signingConfigs.getByName("FCLDebugKey")
-            // 与 FileProvider authority（${applicationId}.provider）保持一致（原 FCLLibrary 模块的 resValue）
-            resValue("string", "file_browser_provider", "com.tungsten.fcl.debug.provider")
         }
         configureEach {
+            resValue("string", "file_browser_provider", "com.questfcl.launcher.provider")
             resValue("string", "app_version", defaultConfig.versionName.toString())
             resValue("string", "curse_api_key", curseApiKey.toString())
             resValue("string", "oauth_api_key", oauthApiKey.toString())
@@ -137,6 +144,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/jni/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -186,7 +194,7 @@ androidComponents {
             if (output is com.android.build.api.variant.impl.VariantOutputImpl) {
                 (output.getFilter(ABI)?.identifier ?: "all").let { abi ->
                     output.outputFileName =
-                        "FCL-${variant.buildType}-${project.android.defaultConfig.versionName}-${abi}.apk"
+                        "FCL-Quest-VR-${variant.buildType}-${project.android.defaultConfig.versionName}-${abi}.apk"
                 }
             }
         }

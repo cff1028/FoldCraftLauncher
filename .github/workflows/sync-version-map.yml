@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   sync:
+    if: github.repository == 'FCL-Team/FoldCraftLauncher'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout FoldCraftLauncher

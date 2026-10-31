@@ -19,6 +19,7 @@ import com.mio.plugin.DriverPlugin;
 import com.mio.plugin.FFmpegPlugin;
 import com.mio.plugin.NativeLibPlugin;
 import com.mio.plugin.RendererPlugin;
+import com.tungsten.fcl.vr.QuestVrRuntime;
 import com.oracle.dalvik.VMLauncher;
 import com.tungsten.fclauncher.bridge.FCLBridge;
 import com.tungsten.fclauncher.utils.Architecture;
@@ -34,6 +35,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -60,6 +62,7 @@ public class FCLauncher {
     private static void logStartInfo(FCLConfig config, FCLBridge bridge, String task) {
         printTaskTitle(bridge, "Start " + task);
         log(bridge, "Renderer: " + bridge.getRenderer());
+        log(bridge, "Quest VR: " + config.isVrEnabled());
         log(bridge, "Device: " + getDeviceName());
         log(bridge, "Architecture: " + Architecture.archAsString(Architecture.getDeviceArchitecture()));
         log(bridge, "CPU: " + getSocName());
@@ -356,6 +359,10 @@ public class FCLauncher {
 
     private static void addRendererEnvInner(FCLConfig config, HashMap<String, String> envMap) {
         Renderer renderer = config.getRenderer();
+        if (config.isVrEnabled()) {
+            QuestVrRuntime.applyEnvironment(config, envMap);
+            return;
+        }
         if (!renderer.getPath().isEmpty()) {
             if (!renderer.getPojavRendererId().isEmpty()) {
                 envMap.put("POJAV_RENDERER", renderer.getPojavRendererId());
@@ -407,6 +414,31 @@ public class FCLauncher {
             } else {
                 envMap.put("POJAV_RENDERER", "opengles2_vgpu");
             }
+        } else if (renderer.isEqual(Renderer.ID_MOBILEGLUES)) {
+            File directory = getNormalMobileGluesDirectory(config);
+            try {
+                Files.createDirectories(directory.toPath());
+                File configuration = new File(directory, "config.json");
+                if (!configuration.isFile()) {
+                    String defaults = "{\"enableANGLE\":2,\"enableNoError\":1," +
+                            "\"fsr1Setting\":0,\"enableExtDirectStateAccess\":1," +
+                            "\"enableExtTimerQuery\":1,\"enableExtComputeShader\":0," +
+                            "\"customGLVersion\":0,\"maxGlslCacheSize\":32}";
+                    Files.write(configuration.toPath(), defaults.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (IOException failure) {
+                throw new IllegalStateException("Cannot prepare the MobileGlues configuration directory", failure);
+            }
+            Map<String, String> mgPrefs = RendererPlugin.builtinEnvPrefs(Renderer.ID_MOBILEGLUES);
+            writeMobileGluesConfig(directory, mgPrefs);
+            if (RendererPlugin.toggleEnabled(mgPrefs, "MG_COUNT_LAUNCH", true)) {
+                envMap.put("MG_COUNT_LAUNCH", "1");
+            }
+            envMap.put("MG_DIR_PATH", directory.getAbsolutePath());
+            envMap.put("POJAV_RENDERER", "opengles3_mobileglues");
+            envMap.put("POJAVEXEC_EGL", "libmobileglues.so");
+            envMap.put("LIBGL_ES", "3");
+            envMap.put("LIBGL_GLES", "libGLESv3.so");
         } else if (renderer.isEqual(Renderer.ID_NGGL4ES)) {
             envMap.put("LIBGL_USE_MC_COLOR", "1");
             envMap.put("DLOPEN", "libspirv-cross-c-shared.so");
@@ -430,21 +462,12 @@ public class FCLauncher {
                 envMap.put("POJAV_RENDERER", "opengles3_desktopgl_zink_kopper");
                 envMap.put("LIBGL_ES", "3");
                 envMap.put("POJAVEXEC_EGL", renderer.getEglName());
-            } else if (renderer.isEqual(Renderer.ID_MOBILEGLUES)) {
-                envMap.put("POJAV_RENDERER", "opengles3_mobileglues");
-                envMap.put("LIBGL_ES", "3");
-                envMap.put("LIBGL_EGL", "libmobileglues.so");
-                envMap.put("POJAVEXEC_EGL", "libmobileglues.so");
-                // 内置版使用独立配置：不共用 /sdcard/MG，配置写在应用私有存储并经 MG_DIR_PATH 指向
-                Map<String, String> mgPrefs = RendererPlugin.builtinEnvPrefs(Renderer.ID_MOBILEGLUES);
-                File mgDir = new File(config.getContext().getFilesDir(), "mobileglues");
-                writeMobileGluesConfig(mgDir, mgPrefs);
-                envMap.put("MG_DIR_PATH", mgDir.getAbsolutePath());
-                if (RendererPlugin.toggleEnabled(mgPrefs, "MG_COUNT_LAUNCH", true)) {
-                    envMap.put("MG_COUNT_LAUNCH", "1");
-                }
             }
         }
+    }
+
+    private static File getNormalMobileGluesDirectory(FCLConfig config) {
+        return new File(config.getContext().getFilesDir(), "renderers/mobileglues");
     }
 
     private static void setEnv(FCLConfig config, FCLBridge bridge, boolean render) {
@@ -455,6 +478,10 @@ public class FCLauncher {
             addRendererEnv(config, envMap);
         }
         addCustomEnv(config, envMap);
+        if (render && !config.isVrEnabled() && config.getRenderer().isEqual(Renderer.ID_MOBILEGLUES)) {
+            envMap.put("MG_DIR_PATH", getNormalMobileGluesDirectory(config).getAbsolutePath());
+        }
+        QuestVrRuntime.applyEnvironment(config, envMap);
         printTaskTitle(bridge, "Env Map");
         for (String key : envMap.keySet()) {
             log(bridge, "Env: " + key + "=" + envMap.get(key));
@@ -601,10 +628,20 @@ public class FCLauncher {
         return returnValue;
     }
 
-    private static void setupGraphicAndSoundEngine(FCLConfig config, FCLBridge bridge) {
+    private static void setupGraphicAndSoundEngine(FCLConfig config, FCLBridge bridge) throws IOException {
         String nativeDir = config.getContext().getApplicationInfo().nativeLibraryDir;
 
         bridge.dlopen(nativeDir + "/libopenal.so");
+        if (config.isVrEnabled()) {
+            String[] required = {"libopenxr_loader.so", "libquest_openxr.so", "libvloader.so",
+                    config.getRenderer().getGlName()};
+            for (String library : required) {
+                if (bridge.dlopen(nativeDir + "/" + library) == 0) {
+                    throw new IOException("Cannot load Quest VR library: " + library);
+                }
+            }
+            return;
+        }
         if (!config.getRenderer().getPath().isEmpty()) {
             List<String> envList = config.getRenderer().getPojavEnv();
             if (envList != null) {
@@ -666,9 +703,12 @@ public class FCLauncher {
 
     public static FCLBridge launchMinecraft(FCLConfig config) {
         FCLBridge bridge = launchProcess(config, FCLPath.LATEST_GAME_LOG, "Minecraft", true, true, true);
+        bridge.setLaunchConfig(config);
         // 标志先落在 bridge 实例上：launch 线程无 Looper，不能在此触碰 CallbackBridge（类初始化含 Choreographer）
         bridge.setCleanroomActive(config.getInstalledModLoaders() != null
                 && config.getInstalledModLoaders().getInstallCleanroom());
+        bridge.setVrEnabled(config.isVrEnabled());
+        bridge.setVrRendererId(config.isVrEnabled() ? config.getRenderer().getId() : null);
         return bridge;
     }
 
@@ -709,8 +749,10 @@ public class FCLauncher {
 
                 // launch
                 launch(config, bridge, task);
-            } catch (IOException e) {
+            } catch (Exception | LinkageError e) {
                 Logging.LOG.log(Level.SEVERE, e.toString());
+                bridge.receiveLog("Launch failed: " + e + "\n");
+                bridge.onExit(1);
             }
         });
 

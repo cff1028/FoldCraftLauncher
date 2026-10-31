@@ -1,3 +1,11 @@
+## Quest VR fork
+
+Quest 3 / ARM64 fork maintained by cff1028. Package `com.questfcl.launcher` coexists with upstream FCL.
+Per-instance VR, render scale/FSAA, in-game VR/flat switching and Vivecraft downloads. MobileGlues VR only; LTW is excluded.
+[Preview releases](https://github.com/cff1028/FoldCraftLauncher/releases) · [Build](BUILDING.txt) · [Licenses and sources](third-party/quest-vr/README.md)
+
+Upstream project information and credits follow.
+
 <div align="center">
     <img width="75" src="/FCL/src/main/res/drawable/img_app.png"></img>
 </div>
@@ -6,9 +14,9 @@
 
 <div align="center">
 
-[![Android CI](https://github.com/FCL-Team/FoldCraftLauncher/actions/workflows/build.yml/badge.svg)](https://github.com/FCL-Team/FoldCraftLauncher/actions/workflows/build.yml)
-![Downloads](https://img.shields.io/github/downloads/FCL-Team/FoldCraftLauncher/total?style=flat-square&color=f18cb9)
-![Release](https://img.shields.io/github/v/release/FCL-Team/FoldCraftLauncher?style=flat-square&color=f18cb9)
+[![Android CI](https://github.com/cff1028/FoldCraftLauncher/actions/workflows/build.yml/badge.svg)](https://github.com/cff1028/FoldCraftLauncher/actions/workflows/build.yml)
+![Downloads](https://img.shields.io/github/downloads/cff1028/FoldCraftLauncher/total?style=flat-square&color=f18cb9)
+![Release](https://img.shields.io/github/v/release/cff1028/FoldCraftLauncher?include_prereleases&style=flat-square&color=f18cb9)
 
 [![Discord](https://img.shields.io/badge/Discord-red?logo=discord&logoColor=white)](https://discord.gg/ffhvuXTwyV)
 [![QQ](https://img.shields.io/badge/QQ-green)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=LwxydGEvBZJnn09sXOjkQo9tuuLcYwx5&authKey=seyY5pPUCIHMWS5FqVryq926T0G2GarSXetpxxV9DJxBVt%2FPcg1vxN%2F%2FXpsCowyk&noverify=0&group_code=762054349)
@@ -101,7 +109,7 @@ We'd love your help with translations! The project's localization is managed on 
 - [virglrenderer](https://github.com/AngelAuraMC/virglrenderer): [MIT License](https://gitlab.freedesktop.org/virgl/virglrenderer/-/blob/master/COPYING).
 - [OpenAL-Soft](https://github.com/kcat/openal-soft): [GNU LGPLv2.1](https://github.com/kcat/openal-soft/blob/master/COPYING)
     - [oboe](https://github.com/google/oboe): [Apache License 2.0](https://github.com/google/oboe/blob/main/LICENSE).
-    - [pfffft](https://bitbucket.org/jpommier/pffft/src/master/): [ARR]
+    - [pfffft](https://bitbucket.org/jpommier/pffft/src/master/): [FFTPACK license](third-party/quest-vr/PFFFT-NOTICE.txt)
 - [EasyTier](https://github.com/EasyTier/EasyTier) (embedded networking layer in the Terracotta module): [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
 - [Terracotta](https://github.com/burningtnt/Terracotta) (`net.burningtnt.terracotta` JNI wrapper): [AGPL-3.0](https://github.com/burningtnt/Terracotta/blob/main/LICENSE)
 - [TouchController](https://github.com/TouchController/TouchController) (touch controller): [LGPL-3.0](https://github.com/TouchController/TouchController/blob/main/LICENSE)

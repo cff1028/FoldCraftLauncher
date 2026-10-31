@@ -14,12 +14,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.tungsten.fcl.R
 import com.tungsten.fcl.activity.JVMActivity
+import com.tungsten.fcl.vr.QuestVrSession
+import com.tungsten.fcl.vr.QuestGameBootstrap
 
 /**
  * 游戏会话保活前台服务：仅承载前台通知与进程优先级，
  * 避免游戏切后台后进程降为缓存级、因内存占用过高被系统优先回收。
  */
-class GameService : Service() {
+open class GameService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -48,8 +50,12 @@ class GameService : Service() {
     }
 
     private fun buildContentIntent(): PendingIntent {
-        val intent = Intent(this, JVMActivity::class.java).apply {
+        val vrSession = QuestVrSession.get()
+        val target = vrSession?.notificationActivity() ?: JVMActivity::class.java
+        val intent = Intent(this, target).apply {
+            action = Intent.ACTION_MAIN
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            if (vrSession != null) addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
         return PendingIntent.getActivity(
             this, 0, intent,
@@ -75,13 +81,16 @@ class GameService : Service() {
         /** 游戏界面创建时启动保活服务；须在应用处于前台时调用（Android 12+ 前台服务启动限制） */
         @JvmStatic
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, GameService::class.java))
+            context.startForegroundService(serviceIntent(context))
         }
 
         /** 游戏界面销毁时停止服务并移除通知 */
         @JvmStatic
         fun stop(context: Context) {
-            context.stopService(Intent(context, GameService::class.java))
+            context.stopService(serviceIntent(context))
         }
+
+        private fun serviceIntent(context: Context) = Intent(context,
+            if (QuestGameBootstrap.isGameProcess()) QuestGameService::class.java else GameService::class.java)
     }
 }

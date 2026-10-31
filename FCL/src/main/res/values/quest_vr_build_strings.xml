@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quest_vr_preview_updates">FCL Quest VR is a separate preview build. Install updates supplied with this project to keep VR support.</string>
+</resources>

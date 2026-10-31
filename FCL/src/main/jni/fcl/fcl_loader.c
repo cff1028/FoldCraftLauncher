@@ -17,6 +17,7 @@
 static volatile jobject exitTrap_bridge;
 static volatile jmethodID exitTrap_method;
 static JavaVM *exitTrap_jvm;
+static int exitTrap_vr;
 static volatile jmethodID log_method;
 static JavaVM *log_pipe_jvm;
 static int fclFd[2];
@@ -151,6 +152,10 @@ Java_com_tungsten_fclauncher_bridge_FCLBridge_setenv(JNIEnv *env, jobject jobjec
     (*env)->ReleaseStringUTFChars(env, str2, value);
 }
 
+int fcl_is_vr_game(void) {
+    return exitTrap_vr;
+}
+
 _Noreturn void nominal_exit(int code) {
     JNIEnv *env;
     jint errorCode = (*exitTrap_jvm)->GetEnv(exitTrap_jvm, (void **) &env, JNI_VERSION_1_6);
@@ -158,15 +163,18 @@ _Noreturn void nominal_exit(int code) {
         errorCode = (*exitTrap_jvm)->AttachCurrentThread(exitTrap_jvm, &env, NULL);
     }
     if (errorCode != JNI_OK) {
+        if (exitTrap_vr) _exit(code);
         // Step on a landmine and die, since we can't invoke the Dalvik exit without attaching to
         // Dalvik.
         // I mean, if Zygote can do that, why can't I?
         killpg(getpgrp(), SIGTERM);
     }
-    if (code != 0) {
-        // Exit code 0 is pretty established as "eh it's fine"
-        // so only open the GUI if the code is != 0
+    if (code != 0 || exitTrap_vr) {
         (*env)->CallVoidMethod(env, exitTrap_bridge, exitTrap_method, code);
+    }
+    if (exitTrap_vr) {
+        for (int remaining = 150; remaining > 0; --remaining) usleep(100000);
+        _exit(code);
     }
     // Delete the reference, not gonna need 'em later anyway
     (*env)->DeleteGlobalRef(env, exitTrap_bridge);
@@ -195,5 +203,7 @@ Java_com_tungsten_fclauncher_bridge_FCLBridge_setupExitTrap(JNIEnv *env, jobject
     jclass exitTrap_exitClass = (*env)->NewGlobalRef(env, (*env)->FindClass(env,
                                                                             "com/tungsten/fclauncher/bridge/FCLBridge"));
     exitTrap_method = (*env)->GetMethodID(env, exitTrap_exitClass, "onExit", "(I)V");
+    jmethodID isVrEnabled = (*env)->GetMethodID(env, exitTrap_exitClass, "isVrEnabled", "()Z");
+    exitTrap_vr = (*env)->CallBooleanMethod(env, bridge, isVrEnabled) == JNI_TRUE;
     (*env)->DeleteGlobalRef(env, exitTrap_exitClass);
 }

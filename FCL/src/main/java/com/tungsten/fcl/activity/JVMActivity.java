@@ -3,6 +3,10 @@ package com.tungsten.fcl.activity;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
@@ -34,6 +38,7 @@ import com.tungsten.fcl.game.sdl.SdlBridge;
 import com.mio.flite.FliteTts;
 import com.mio.service.GameService;
 import com.tungsten.fcl.setting.GameOption;
+import com.tungsten.fcl.vr.QuestVrSession;
 import com.tungsten.fcl.terracotta.Terracotta;
 import com.mio.util.AndroidUtilKt;
 import com.tungsten.fclauncher.bridge.FCLBridge;
@@ -51,6 +56,8 @@ import java.util.logging.Level;
 public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextureListener {
 
     private TextureView textureView;
+    @Nullable private QuestVrSession questSession;
+    private boolean questInputInitialized;
 
     /** 游戏渲染用的 native Surface，保留引用供系统降档后重新发起刷新率投票 */
     @Nullable
@@ -101,6 +108,18 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
         JVMActivity.menuType = menuType;
     }
 
+    public static FCLBridge getPreparedBridge() {
+        return fclBridge;
+    }
+
+    private void configureOpaqueGamePresentation() {
+        textureView.setOpaque(true);
+        Paint presentationPaint = new Paint();
+        presentationPaint.setColorFilter(new PorterDuffColorFilter(Color.BLACK, PorterDuff.Mode.DST_OVER));
+        textureView.setLayerPaint(presentationPaint);
+        Logging.LOG.info("Quest flat-window presentation: opaque RGB, DST_OVER alpha repair");
+    }
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -111,10 +130,25 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
             return;
         }
 
+        if (fclBridge.isVrEnabled()) {
+            questSession = QuestVrSession.get();
+            if (questSession == null) {
+                finish();
+                return;
+            }
+            questSession.restoreLaunchMetadata(this);
+        }
         menu = menuType == MenuType.GAME ? new GameMenu() : new JarExecutorMenu();
         menu.setup(this, fclBridge);
+        if (questSession != null) {
+            if (!(menu instanceof GameMenu) || !questSession.attachFlat(this, (GameMenu) menu)) {
+                finish();
+                return;
+            }
+        }
         GameService.start(this);
         textureView = findViewById(R.id.texture_view);
+        configureOpaqueGamePresentation();
         textureView.setSurfaceTextureListener(this);
         if (FCLBridge.FORCE_RESOLUTION) {
             applyForceResolutionLayout();
@@ -310,6 +344,20 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
         Surface nativeSurface = new Surface(surfaceTexture);
         gameSurface = nativeSurface;
         applyMaxRefreshRatePolicy();
+        if (questSession != null) {
+            fclBridge.setSurfaceTexture(surfaceTexture);
+            int[] size = resolveWindowSize(i, i1);
+            surfaceTexture.setDefaultBufferSize(size[0], size[1]);
+            CallbackBridge.windowWidth = size[0];
+            CallbackBridge.windowHeight = size[1];
+            if (!questInputInitialized) {
+                menu.getInput().initExternalController(textureView);
+                questInputInitialized = true;
+            }
+            questSession.flatSurface(this, nativeSurface);
+            fclBridge.pushEventWindow(size[0], size[1]);
+            return;
+        }
         if (isRunning) {
             fclBridge.setSurfaceTexture(surfaceTexture);
             CallbackBridge.setupBridgeWindow(nativeSurface);
@@ -364,6 +412,12 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
 
     @Override
     public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surfaceTexture) {
+        if (questSession != null) {
+            questSession.flatSurface(this, null);
+            if (gameSurface != null) gameSurface.release();
+            gameSurface = null;
+            return true;
+        }
         fclBridge.setSurfaceDestroyed(true);
         gameSurface = null;
         if (SdlBridge.getSdlEnabled() && SDLActivity.getSDLSurface() != null) {
@@ -391,10 +445,15 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
     @Override
     protected void onPause() {
         if (menu != null) {
-            menu.onPause();
+            if (questSession != null && questSession.wantsImmersive() && menu instanceof GameMenu)
+                ((GameMenu) menu).pauseForVrTransition();
+            else menu.onPause();
         }
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 0);
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 0);
+        if (questSession != null) questSession.flatPaused(this);
+        else {
+            CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 0);
+            CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 0);
+        }
         super.onPause();
     }
 
@@ -403,20 +462,23 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
         if (menu != null) {
             menu.onResume();
         }
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 1);
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 1);
+        if (questSession != null) questSession.flatResumed(this);
+        else {
+            CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 1);
+            CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 1);
+        }
         super.onResume();
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_VISIBLE, 1);
+        if (questSession == null) CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_VISIBLE, 1);
     }
 
     @Override
     protected void onStop() {
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_VISIBLE, 0);
+        if (questSession == null) CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_VISIBLE, 0);
         super.onStop();
     }
 
@@ -493,18 +555,24 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
         if (displayManager != null) {
             displayManager.unregisterDisplayListener(displayListener);
         }
-        Terracotta.setWaiting(this, true);
-        CallbackBridge.resetInputState();
-        SdlBridge.reset();
-        FliteTts.shutdown();
-        GameService.stop(this);
+        if (questSession != null) {
+            questSession.flatDestroyed(this);
+            if (menu instanceof GameMenu) ((GameMenu) menu).releaseSessionPanel();
+        } else {
+            Terracotta.setWaiting(this, true);
+            CallbackBridge.resetInputState();
+            SdlBridge.reset();
+            FliteTts.shutdown();
+            GameService.stop(this);
+        }
         super.onDestroy();
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, hasFocus ? 1 : 0);
+        if (questSession == null || questSession.isFlat())
+            CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, hasFocus ? 1 : 0);
         if (menu == null || menuType != MenuType.GAME) {
             return;
         }

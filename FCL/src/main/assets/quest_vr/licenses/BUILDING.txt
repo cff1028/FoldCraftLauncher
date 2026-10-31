@@ -1,0 +1,37 @@
+FCL Quest VR — build and relink
+
+Source: https://github.com/cff1028/FoldCraftLauncher
+Release: v0.1.0-vr-preview10; package com.questfcl.launcher; VersionCode 10.
+
+Use JDK 17, Android SDK 35, NDK 27.0.12077973, CMake 3.22.1 and the Gradle wrapper.
+Set ANDROID_HOME or sdk.dir in local.properties, then:
+  ./gradlew :FCL:checkstyle :FCL:assembleFordebug -Darch=arm64
+This makes a debug-signed APK suitable for installing a modified build.
+
+For a release signed with your own key, set these environment variables:
+  QUEST_FCL_KEYSTORE_FILE, QUEST_FCL_KEYSTORE_PASSWORD,
+  QUEST_FCL_KEY_ALIAS, QUEST_FCL_KEY_PASSWORD
+Then run:
+  ./gradlew :FCL:assembleRelease -Darch=arm64
+Keys are private and are not included in the repository or source archives.
+An APK signed with a different key requires uninstalling the prior package
+(back up game data first), or changing applicationId to install it separately.
+CI build artifacts use a development key; releases use the existing Quest key.
+
+MobileGlues: the release's MobileGlues-2.0.0-quest-source.zip includes the patched
+source, dependencies and rebuild scripts. Follow mobileglues-fix/README-source.txt.
+Replace FCL/src/main/jniLibs/arm64-v8a/libmobileglues.so with your rebuilt library.
+The four source-file modification notices are comment-only additions to the
+sources used to build the bundled library; renderer code is unchanged.
+
+SimpleFPEWrapper: the release's SimpleFPEWrapper-ca8c6af26ca2-source.zip includes
+the exact revision identified by the bundled library's build stamp, dependencies
+and original CMake/Gradle files. Build the SimpleFPEWrapper CMake shared target
+with the NDK toolchain, ANDROID_ABI=arm64-v8a, ANDROID_PLATFORM=android-26,
+ANDROID_STL=c++_static and CMAKE_BUILD_TYPE=Release. Replace
+jni/arm64-v8a/libSimpleFPEWrapper.so inside FCL/libs/SimpleFPEWrapper-release.aar,
+then rebuild the launcher. Source changes and toolchain paths can change hashes.
+
+FCL's inherited dependencies and source projects remain credited in README;
+their copyright notices and licenses continue to apply. For VR component
+provenance and dependency licenses see third-party/quest-vr/README.md.

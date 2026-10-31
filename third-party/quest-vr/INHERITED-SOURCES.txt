@@ -1,0 +1,30 @@
+Inherited components and source locations
+
+The unmodified runtime binaries and libraries originate from FCL main
+52eb2b3aa51e677bc0382431e8788cc65ff43fc3. Original notices, bundled JRE legal
+files and upstream source headers are retained. Source/build projects:
+
+OpenJDK (GPL-2.0 with Classpath Exception), Java 8/17/21/25:
+https://github.com/FCL-Team/Android-OpenJDK-Build
+Use the Build_JRE_8, Build_JRE_17, Build_JRE_21 and Build_JRE_25 branches.
+JRE licenses are inside the runtime archives under LICENSE or legal/.
+OpenAL Soft (LGPL-2.1): https://github.com/FCL-Team/OpenAL
+https://github.com/kcat/openal-soft
+Oboe (Apache-2.0): https://github.com/google/oboe
+Terracotta (AGPL-3.0): https://github.com/burningtnt/Terracotta
+EasyTier (LGPL-3.0): https://github.com/EasyTier/EasyTier
+TouchController proxy-client-android 0.0.5 (LGPL-3.0):
+https://github.com/TouchController/TouchController
+LWJGL (BSD-3-Clause): https://github.com/FCL-Team/lwjgl3
+The launcher-specific Java patches are in LWJGL/ in this release's source.
+GL4ES (MIT): https://github.com/ptitSeb/gl4es
+NG-GL4ES (MIT): https://github.com/ShirosakiMio/NG-GL4ES
+ByteHook (MIT): https://github.com/bytedance/bhook
+SDL (zlib): https://github.com/libsdl-org/SDL
+Discord RPC (MIT): https://github.com/discord/discord-rpc
+
+Additional copied license texts in this directory supplement the existing
+upstream README credits. AMD FSR1 and Michal Drobot notices, khash and Khronos
+platform notices are reproduced from the pinned MobileGlues source tree.
+The PFFFT/FFTPACK notice comes from OpenAL's common/pffft.cpp; its terms permit
+redistribution. Per-file terms continue to apply to all components.

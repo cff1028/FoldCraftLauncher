@@ -30,6 +30,7 @@ import com.google.gson.annotations.JsonAdapter
 import com.mio.JavaManager
 import com.mio.data.Renderer
 import com.tungsten.fcl.FCLApp
+import com.tungsten.fcl.vr.QuestVrGraphicsSettings
 import com.tungsten.fclcore.util.Lang
 import com.tungsten.fclcore.util.platform.MemoryUtils
 import java.lang.reflect.Type
@@ -53,6 +54,7 @@ class VersionSetting : Cloneable {
         set(value) {
             if (field == value) return
             field = value
+            if (value) isVrEnabled = false
             changed()
         }
 
@@ -184,6 +186,37 @@ class VersionSetting : Cloneable {
             changed()
         }
 
+    var isVrEnabled: Boolean = false
+        get() = field && !isUsesGlobal
+        set(value) {
+            val enabled = value && !isUsesGlobal
+            if (field == enabled) return
+            field = enabled
+            changed()
+        }
+
+    var vrRenderScalePercent: Int? = null
+        set(value) {
+            val normalized = QuestVrGraphicsSettings.normalizeRenderScalePercent(value)
+            if (field == normalized) return
+            field = normalized
+            changed()
+        }
+
+    var vrFsaaEnabled: Boolean? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            changed()
+        }
+
+    var nonVrRenderer: String = Renderer.ID_NGGL4ES
+        set(value) {
+            if (field == value) return
+            field = value
+            changed()
+        }
+
     var driver: String = "Turnip"
         set(value) {
             if (field == value) return
@@ -257,6 +290,10 @@ class VersionSetting : Cloneable {
             it.isVKDriverSystem = isVKDriverSystem
             it.controller = controller
             it.renderer = renderer
+            it.isVrEnabled = isVrEnabled
+            it.vrRenderScalePercent = vrRenderScalePercent
+            it.vrFsaaEnabled = vrFsaaEnabled
+            it.nonVrRenderer = nonVrRenderer
             it.driver = driver
             it.isNotCheckMod = isNotCheckMod
             it.isNotCheckVulkan = isNotCheckVulkan
@@ -289,6 +326,10 @@ class VersionSetting : Cloneable {
                 addProperty("vulkanDriverSystem", src.isVKDriverSystem)
                 addProperty("controller", src.controller)
                 addProperty("renderer", src.renderer)
+                addProperty("vrEnabled", src.isVrEnabled)
+                addProperty("vrRenderScalePercent", src.vrRenderScalePercent)
+                addProperty("vrFsaaEnabled", src.vrFsaaEnabled)
+                addProperty("nonVrRenderer", src.nonVrRenderer)
                 addProperty("driver", src.driver)
                 addProperty("isolateGameDir", src.isIsolateGameDir)
                 addProperty("notCheckMod", src.isNotCheckMod)
@@ -328,6 +369,10 @@ class VersionSetting : Cloneable {
                 vs.controller = json["controller"]?.asString ?: ("00000000")
                 vs.renderer =
                     json["renderer"]?.asString ?: Renderer.ID_NGGL4ES
+                vs.isVrEnabled = json["vrEnabled"]?.asBoolean ?: false
+                vs.vrRenderScalePercent = QuestVrGraphicsSettings.parseRenderScalePercent(json["vrRenderScalePercent"])
+                vs.vrFsaaEnabled = QuestVrGraphicsSettings.parseFsaaEnabled(json["vrFsaaEnabled"])
+                vs.nonVrRenderer = json["nonVrRenderer"]?.asString ?: Renderer.ID_NGGL4ES
                 vs.driver = json["driver"]?.asString ?: "Turnip"
                 vs.isIsolateGameDir = json["isolateGameDir"]?.asBoolean ?: false
                 vs.isNotCheckMod = json["notCheckMod"]?.asBoolean ?: false

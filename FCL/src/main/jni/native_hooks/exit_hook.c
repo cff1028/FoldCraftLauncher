@@ -17,9 +17,9 @@ static _Atomic bool exit_tripped = false;
 static int exit_code = 0;
 
 typedef void (*exit_func)(int);
-// Use the exit hook *only* to store the exit code.
 static void custom_exit(int code) {
     exit_code = code;
+    if (fcl_is_vr_game()) nominal_exit(code);
     BYTEHOOK_CALL_PREV(custom_exit, exit_func, code);
     BYTEHOOK_POP_STACK();
 }
@@ -84,7 +84,5 @@ Java_com_tungsten_fclauncher_bridge_FCLBridge_initializeHooks(JNIEnv *env, jclas
     if(!hooks_ready) {
         printf("Failed to initialize native hooks!");
     }
-    // Always register atexit, because that's what we will call our exit from.
-    // We only use the hook to capture the exit code.
     atexit(custom_atexit);
 }

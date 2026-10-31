@@ -452,7 +452,9 @@ public final class Accounts {
     // ====
 
     public static String localizeErrorMessage(Context context, Exception exception) {
-        if (exception instanceof NoCharacterException) {
+        if (exception instanceof OAuthServer.MicrosoftAuthenticationNotSupportedException) {
+            return context.getString(R.string.quest_oauth_client_required);
+        } else if (exception instanceof NoCharacterException) {
             return context.getString(R.string.account_failed_no_character);
         } else if (exception instanceof ServerDisconnectException) {
             return context.getString(R.string.account_failed_connect_authentication_server) + "\n" + exception;
