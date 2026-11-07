@@ -84,7 +84,7 @@ object RendererManager {
         )
 
         RENDERER_MOBILEGLUES = Renderer(
-            name = "MobileGlues 2.0.0",
+            name = "MobileGlues 2.0.1 Dev1",
             des = context.getString(R.string.settings_renderer_mobileglues),
             glName = "libquest_mobileglues.so",
             eglName = "libmobileglues.so",
@@ -92,7 +92,7 @@ object RendererManager {
             boatEnv = null,
             pojavEnv = null,
             id = Renderer.ID_MOBILEGLUES,
-            displayMaxMCver = "26.2",
+            displayMaxMCver = "26.3",
             vrCompatible = false,
             vrOnly = false
         )
@@ -105,7 +105,7 @@ object RendererManager {
             boatEnv = null,
             pojavEnv = null,
             id = Renderer.ID_QUEST_MOBILEGLUES,
-            displayMaxMCver = "26.2",
+            displayMaxMCver = "26.3",
             vrCompatible = true,
             vrOnly = true
         )

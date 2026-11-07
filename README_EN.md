@@ -1,8 +1,8 @@
 ## Quest VR fork
 
 Quest 3 / ARM64 fork maintained by cff1028. Package `com.questfcl.launcher` coexists with upstream FCL.
-Per-instance VR, render scale/FSAA, in-game VR/flat switching and Vivecraft downloads. MobileGlues VR only; LTW is excluded.
-[Preview releases](https://github.com/cff1028/FoldCraftLauncher/releases) · [Build](BUILDING.txt) · [Licenses and sources](third-party/quest-vr/README.md)
+Per-instance VR, render scale, FSAA, stereo synchronization, in-game VR/flat switching and Vivecraft downloads from QuestCraft or cff1028. Stereo synchronization defaults on to improve stability with demanding shaders. Includes MobileGlues 2.0.1 Dev1 with Minecraft 26.3 compatibility fixes; LTW is excluded.
+[Releases](https://github.com/cff1028/FoldCraftLauncher/releases) · [Build](BUILDING.txt) · [Licenses and sources](third-party/quest-vr/README.md)
 
 Upstream project information and credits follow.
 

@@ -34,6 +34,7 @@ enum class VersionSettingTag {
     VULKAN,
     VR,
     VR_FSAA,
+    VR_STEREO_SYNC,
 
     // 按钮行
     EDIT_ICON,
@@ -174,6 +175,14 @@ class VersionSettingAdapter(
                     disabled = versionSetting.vrFsaaEnabled == null && vrGraphicsSettings == null,
                     rowTag = VersionSettingTag.VR_FSAA,
                     descriptionRes = R.string.settings_vr_fsaa_desc,
+                    group = SettingGroup.Render,
+                )
+                result += Row.SwitchRow(
+                    R.string.settings_vr_stereo_sync,
+                    { versionSetting.vrStereoSyncEnabled },
+                    { versionSetting.vrStereoSyncEnabled = it },
+                    rowTag = VersionSettingTag.VR_STEREO_SYNC,
+                    descriptionRes = R.string.settings_vr_stereo_sync_desc,
                     group = SettingGroup.Render,
                 )
             }

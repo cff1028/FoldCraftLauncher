@@ -3,17 +3,17 @@
     <string name="qv_download_title">Quest Vivecraft</string>
     <string name="qv_download_browse">Browse and install Quest Vivecraft</string>
     <string name="qv_download_target">Instance: %1$s · Minecraft %2$s · %3$s\nInstall to: %4$s</string>
-    <string name="qv_download_note">Official QuestCraft Android/OpenXR releases. The list uses release information; Minecraft and loader compatibility are verified inside the JAR before installation.</string>
+    <string name="qv_download_note">Choose an Android/OpenXR release source. Minecraft and loader compatibility are verified inside the JAR before installation.</string>
     <string name="qv_download_refresh">Refresh list</string>
-    <string name="qv_download_website">Official releases</string>
+    <string name="qv_download_website">Source releases</string>
     <string name="qv_download_loading">Loading compatible releases and checking installed mods…</string>
     <string name="qv_download_choose">Select a release to download into this instance.</string>
-    <string name="qv_download_empty">No matching Android/OpenXR release was found for this Minecraft version and loader. Try refreshing later or check the official release notes.</string>
+    <string name="qv_download_empty">This source has no matching Android/OpenXR release. Try another source or check its release notes.</string>
     <string name="qv_download_unsupported">The Minecraft version or loader could not be identified. Install a supported mod loader for this instance, then reopen this page from its VR settings.</string>
     <string name="qv_download_installed">Compatible Vivecraft installed: %1$s. Existing files are preserved.</string>
     <string name="qv_download_conflict">Vivecraft files already exist: %1$s. Resolve incompatible or duplicate mods in the instance mod manager before installing another version.</string>
     <string name="qv_download_install_title">Install Quest Vivecraft</string>
-    <string name="qv_download_install_prompt">Download %1$s for instance %2$s?\n\n%3$s\n\nThe downloaded JAR will be checked before installation. Existing mods will not be overwritten.</string>
+    <string name="qv_download_install_prompt">Download %1$s for instance %2$s?\nSource: %4$s\n\n%3$s\n\nThe downloaded JAR will be checked before installation. Existing mods will not be overwritten.</string>
     <string name="qv_download_downloading">Starting download…</string>
     <string name="qv_download_progress">Downloading: %1$s / %2$s</string>
     <string name="qv_download_verifying">Checking Android/OpenXR support and mod dependencies…</string>
@@ -22,12 +22,13 @@
     <string name="qv_download_already">Already installed: %1$s. No files were changed.</string>
     <string name="qv_download_cancelling">Cancelling…</string>
     <string name="qv_download_cancelled">Cancelled. Refresh or select a release to try again.</string>
-    <string name="qv_download_network">Could not load or download the official release. Check your network and retry. GitHub may temporarily limit requests.</string>
-    <string name="qv_download_incompatible">This file is not compatible with the current Minecraft version, loader, or Android/OpenXR runtime. Nothing was installed; choose another release or check the official notes.</string>
+    <string name="qv_download_network">Could not load or download from this source. Check your network and retry. GitHub may temporarily limit requests.</string>
+    <string name="qv_download_incompatible">This file is not compatible with the current Minecraft version, loader, or Android/OpenXR runtime. Nothing was installed; choose another release or check its notes.</string>
     <string name="qv_download_conflict_error">A Vivecraft file or destination with the same name already exists. No existing mod was replaced. Resolve it in the instance mod manager, then refresh.</string>
     <string name="qv_download_destination_error">Cannot write to this instance. Check storage access and the game directory, then retry.</string>
     <string name="qv_download_integrity_error">The downloaded file failed integrity verification. Nothing was installed. Check your network and retry.</string>
     <string name="qv_download_row_installed">Installed</string>
     <string name="qv_download_prerelease">Preview · Android/OpenXR</string>
     <string name="qv_download_release">Release · Android/OpenXR</string>
+    <string name="qv_download_source">Source</string>
 </resources>

@@ -142,6 +142,7 @@ add_library(
     ctxbridges/loader_dlopen.c
     ctxbridges/gl_bridge.c
     questvr/quest_vr.c
+    questvr/gpu_guard.c
     ctxbridges/osm_bridge.c
     ctxbridges/egl_loader.c
     ctxbridges/osmesa_loader.c
@@ -186,11 +187,12 @@ add_library(vloader SHARED questvr/vloader.c)
 target_link_libraries(vloader PRIVATE dl log)
 target_link_libraries(pojavexec PRIVATE vloader)
 
-add_library(quest_openxr SHARED questvr/openxr_adapter.c)
-target_link_libraries(quest_openxr PRIVATE vloader EGL GLESv3 log dl)
+add_library(quest_openxr SHARED questvr/openxr_adapter.c questvr/stereo_sync.c)
+target_link_libraries(quest_openxr PRIVATE vloader EGL GLESv3 log dl m)
 
 add_library(quest_mobileglues SHARED questvr/mobileglues_adapter.c)
 target_link_libraries(quest_mobileglues PRIVATE vloader log dl)
+
 
 
 # 模块：vulkan_check - Vulkan 设备能力检测

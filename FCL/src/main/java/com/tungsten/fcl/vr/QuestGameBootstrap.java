@@ -117,9 +117,12 @@ public final class QuestGameBootstrap {
         launch.logDir = config.getLogDir();
         launch.javaPath = config.getJavaPath();
         launch.workingDir = config.getWorkingDir();
+        launch.vrStereoSyncEnabled = config.getVrStereoSyncEnabled();
+        launch.sfpewLayerEnabled = config.getSfpewLayerEnabled();
         launch.renderer = config.getRenderer();
         launch.args = config.getArgs();
         launch.useVKDriverSystem = config.getUseVKDriverSystem();
+        launch.highGameThreadPriority = config.getHighGameThreadPriority();
         launch.installedModLoaders = config.getInstalledModLoaders();
         launch.lwjglVersion = config.getLwjglVersion();
         launch.driver = DriverPlugin.getSelected();
@@ -188,6 +191,9 @@ public final class QuestGameBootstrap {
         FCLConfig config = new FCLConfig(activity.getApplicationContext(), launch.logDir,
                 launch.javaPath, launch.workingDir, launch.renderer, launch.args);
         config.setVrEnabled(true);
+        config.setVrStereoSyncEnabled(!Boolean.FALSE.equals(launch.vrStereoSyncEnabled));
+        config.setSfpewLayerEnabled(Boolean.TRUE.equals(launch.sfpewLayerEnabled));
+        config.setHighGameThreadPriority(!Boolean.FALSE.equals(launch.highGameThreadPriority));
         config.setUseVKDriverSystem(launch.useVKDriverSystem);
         config.setInstalledModLoaders(launch.installedModLoaders);
         config.setLwjglVersion(launch.lwjglVersion);
@@ -219,6 +225,9 @@ public final class QuestGameBootstrap {
         Renderer renderer;
         String[] args;
         boolean useVKDriverSystem, useInputStack, forceResolution;
+        Boolean highGameThreadPriority;
+        Boolean vrStereoSyncEnabled;
+        Boolean sfpewLayerEnabled;
         FCLConfig.InstalledModLoaders installedModLoaders;
         DriverPlugin.Driver driver;
         double scaleFactor;

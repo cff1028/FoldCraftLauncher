@@ -86,8 +86,8 @@ android {
         applicationId = "com.questfcl.launcher"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 10
-        versionName = "0.1.0-vr-preview10"
+        versionCode = 20
+        versionName = "0.1.0-vr.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {

@@ -18,11 +18,11 @@ import com.tungsten.fcl.activity.MainActivity;
 import com.tungsten.fcl.ui.UIManager;
 import com.tungsten.fcl.vr.QuestVivecraftService;
 import com.tungsten.fcl.vr.QuestVivecraftTarget;
-import com.tungsten.fcl.vr.VrWarnings;
 import com.tungsten.fclcore.task.Schedulers;
 import com.tungsten.fclcore.util.Logging;
 import com.tungsten.fcllibrary.component.dialog.FCLAlertDialog;
 import com.tungsten.fcllibrary.component.ui.FCLPage;
+import com.tungsten.fcllibrary.component.view.FCLSpinner;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -43,6 +43,8 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     private final ProgressBar progress;
     private final View refresh;
     private final View cancel;
+    private final FCLSpinner<QuestVivecraftService.Source> sourceSpinner;
+    private QuestVivecraftService.Source source = QuestVivecraftService.Source.QUESTCRAFT;
     private QuestVivecraftService.Cancellation cancellation;
     private boolean busy;
     private boolean detached;
@@ -65,6 +67,18 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
         progress = findViewById(R.id.qv_progress);
         refresh = findViewById(R.id.qv_refresh);
         cancel = findViewById(R.id.qv_cancel);
+        sourceSpinner = findViewById(R.id.qv_source);
+        sourceSpinner.setItems(List.of(QuestVivecraftService.Source.values()));
+        sourceSpinner.setOnItemSelectedListener((index, selected) -> {
+            if (busy || detached) {
+                sourceSpinner.setSelection(source.ordinal());
+                return;
+            }
+            if (source != selected) {
+                source = selected;
+                load();
+            }
+        });
         TextView destination = findViewById(R.id.qv_target);
         destination.setText(context.getString(R.string.qv_download_target, target.instanceId,
                 target.minecraftVersion.isEmpty() ? "?" : target.minecraftVersion,
@@ -78,11 +92,13 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
             status.setText(R.string.qv_download_cancelling);
         });
         findViewById(R.id.qv_website).setOnClickListener(v ->
-                AndroidUtilKt.openLink(context, VrWarnings.VIVECRAFT_DOWNLOAD_URL));
+                AndroidUtilKt.openLink(context, source.releasesUrl));
         findViewById(R.id.qv_back).setOnClickListener(v -> UIManager.getInstance().getDownloadUI().dismissCurrentTempPage());
         getContentView().addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) {
+                boolean returning = detached;
                 detached = false;
+                if (returning && !busy) load();
             }
             @Override public void onViewDetachedFromWindow(View v) {
                 detached = true;
@@ -95,6 +111,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     private void setBusy(boolean value) {
         busy = value;
         refresh.setEnabled(!value);
+        sourceSpinner.setEnabled(!value);
         cancel.setEnabled(true);
         cancel.setVisibility(value ? View.VISIBLE : View.GONE);
         progress.setVisibility(value ? View.VISIBLE : View.GONE);
@@ -102,7 +119,9 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     }
 
     private void load() {
-        if (busy) return;
+        if (busy || detached) return;
+        releases.clear();
+        adapter.notifyDataSetChanged();
         if (target.loader == QuestVivecraftTarget.Loader.NONE || target.minecraftVersion.isEmpty()
                 || target.loaderVersion.isEmpty()) {
             status.setText(R.string.qv_download_unsupported);
@@ -110,20 +129,22 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
         }
         cancellation = new QuestVivecraftService.Cancellation();
         QuestVivecraftService.Cancellation operation = cancellation;
+        QuestVivecraftService.Source requestedSource = source;
         setBusy(true);
         progress.setIndeterminate(true);
         status.setText(R.string.qv_download_loading);
         CompletableFuture.supplyAsync(() -> {
             try {
                 List<QuestVivecraftService.InstalledMod> mods = service.scanInstalled(target, operation);
-                List<QuestVivecraftService.ReleaseAsset> assets = service.fetchReleases(target, operation);
+                List<QuestVivecraftService.ReleaseAsset> assets = service.fetchReleases(target, requestedSource, operation);
                 return new Listing(mods, assets);
             } catch (Exception error) {
                 throw new CompletionException(error);
             }
         }).whenCompleteAsync((listing, error) -> {
-            if (getActivity().isDestroyed()) return;
+            if (getActivity().isDestroyed() || operation != cancellation) return;
             setBusy(false);
+            if (detached || source != requestedSource) return;
             if (error != null) {
                 showError(error);
                 return;
@@ -146,17 +167,18 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     }
 
     private void confirmInstall(QuestVivecraftService.ReleaseAsset asset) {
-        if (busy) return;
+        if (busy || detached || asset.source != source) return;
         new FCLAlertDialog.Builder(getContext())
                 .setTitle(getContext().getString(R.string.qv_download_install_title))
                 .setMessage(getContext().getString(R.string.qv_download_install_prompt,
-                        asset.fileName, target.instanceId, new File(target.gameDirectory, "mods").getAbsolutePath()))
+                        asset.fileName, target.instanceId, new File(target.gameDirectory, "mods").getAbsolutePath(),
+                        asset.source.displayName))
                 .setPositiveButton(getContext().getString(R.string.button_download), () -> install(asset))
                 .setNegativeButton(getContext().getString(R.string.button_cancel), null).create().show();
     }
 
     private void install(QuestVivecraftService.ReleaseAsset asset) {
-        if (busy || detached) return;
+        if (busy || detached || asset.source != source) return;
         cancellation = new QuestVivecraftService.Cancellation();
         QuestVivecraftService.Cancellation operation = cancellation;
         setBusy(true);
@@ -182,8 +204,9 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
                 throw new CompletionException(error);
             }
         }).whenCompleteAsync((result, error) -> {
-            if (getActivity().isDestroyed()) return;
+            if (getActivity().isDestroyed() || operation != cancellation) return;
             setBusy(false);
+            if (detached) return;
             if (error != null) {
                 showError(error);
                 return;
@@ -213,7 +236,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
             status.setText(R.string.qv_download_cancelled);
             return;
         }
-        Logging.LOG.log(Level.WARNING, "Quest Vivecraft download for " + target.instanceId, error);
+        Logging.LOG.log(Level.WARNING, "Quest Vivecraft download from " + source.displayName + " for " + target.instanceId, error);
         int message = R.string.qv_download_network;
         if (error instanceof QuestVivecraftService.ServiceException failure) {
             message = switch (failure.error) {
@@ -247,14 +270,15 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
         }
         @Override public View getView(int position, View row, ViewGroup parent) {
             if (row == null) {
-                row = LayoutInflater.from(getContext()).inflate(R.layout.item_mod_version, parent, false);
+                row = LayoutInflater.from(getContext()).inflate(R.layout.item_quest_vivecraft_release, parent, false);
                 row.setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             }
             QuestVivecraftService.ReleaseAsset asset = releases.get(position);
             ((TextView) row.findViewById(R.id.name)).setText(asset.releaseName + " · " + asset.tag);
             boolean present = installed.stream().anyMatch(mod -> !asset.sha256.isEmpty() && asset.sha256.equalsIgnoreCase(mod.sha256));
-            ((TextView) row.findViewById(R.id.tag)).setText(present ? getContext().getString(R.string.qv_download_row_installed)
-                    : getContext().getString(asset.prerelease ? R.string.qv_download_prerelease : R.string.qv_download_release));
+            String releaseType = getContext().getString(present ? R.string.qv_download_row_installed
+                    : asset.prerelease ? R.string.qv_download_prerelease : R.string.qv_download_release);
+            ((TextView) row.findViewById(R.id.tag)).setText(asset.source.displayName + " · " + releaseType);
             ((TextView) row.findViewById(R.id.date)).setText(asset.fileName + "  ·  " + size(asset.size)
                     + "  ·  " + asset.publishedAt.replace('T', ' ').replace("Z", " UTC"));
             View button = row.findViewById(R.id.parent);

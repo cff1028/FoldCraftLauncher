@@ -63,6 +63,7 @@ enum class LauncherSettingTag {
     // 开关行
     SWITCH_AUTO_EXIT,
     SWITCH_QUEST_VR_TRANSITION_ANIMATION,
+    SWITCH_HIGH_GAME_THREAD_PRIORITY,
     SWITCH_IGNORE_NOTCH,
     SWITCH_CLOSE_SKIN_MODEL,
     SWITCH_DISABLE_FULLSCREEN_INPUT,
@@ -184,6 +185,12 @@ class LauncherSettingAdapter(
                 { QuestVrPreferences.isTransitionAnimationEnabled(context) },
                 LauncherSettingTag.SWITCH_QUEST_VR_TRANSITION_ANIMATION,
                 R.string.settings_quest_vr_transition_animation_desc,
+            ),
+            Row.SwitchRow(
+                R.string.settings_high_game_thread_priority,
+                { QuestVrPreferences.isHighGameThreadPriorityEnabled(context) },
+                LauncherSettingTag.SWITCH_HIGH_GAME_THREAD_PRIORITY,
+                R.string.settings_high_game_thread_priority_desc,
             ),
             Row.SpinnerRow(
                 R.string.settings_launcher_theme_mode, themeModeList,

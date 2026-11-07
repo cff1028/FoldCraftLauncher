@@ -129,16 +129,21 @@ def main():
             extract_archive(get_archive(entry, cache, archive_dir), target)
         for entry in provenance['patched_files']:
             file = source / 'MobileGlues-cpp' / entry['path']
-            if sha256(file) != entry['original_sha256']:
+            original = entry['original_sha256']
+            if original is None:
+                if file.exists():
+                    raise ValueError('Expected a new source file: ' + entry['path'])
+            elif sha256(file) != original:
                 raise ValueError('Unexpected original source: ' + entry['path'])
         environment = os.environ.copy()
         for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR'):
             environment.pop(name, None)
         environment['GIT_CEILING_DIRECTORIES'] = str(source.parent)
         command = ['git', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', '--whitespace=nowarn']
-        patch = str(HERE / 'mobileglues-shader-count.patch')
-        subprocess.run(command + ['--check', patch], cwd=source, env=environment, check=True)
-        subprocess.run(command + [patch], cwd=source, env=environment, check=True)
+        for name in provenance['patches']:
+            patch = str(HERE / name)
+            subprocess.run(command + ['--check', patch], cwd=source, env=environment, check=True)
+            subprocess.run(command + [patch], cwd=source, env=environment, check=True)
         for entry in provenance['patched_files']:
             if sha256(source / 'MobileGlues-cpp' / entry['path']) != entry['sha256']:
                 raise ValueError('Patched source SHA256 mismatch: ' + entry['path'])

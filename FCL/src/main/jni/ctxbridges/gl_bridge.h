@@ -3,6 +3,7 @@
 //
 #include <EGL//egl.h>
 #include <stdbool.h>
+#include "questvr/gpu_guard.h"
 #ifndef POJAVLAUNCHER_GL_BRIDGE_H
 #define POJAVLAUNCHER_GL_BRIDGE_H
 
@@ -14,6 +15,7 @@ typedef struct {
     EGLint     format;
     EGLContext context;
     EGLSurface surface;
+    quest_gpu_guard gpu_guard;
 } gl_render_window_t;
 
 bool gl_init();
@@ -23,6 +25,7 @@ void gl_make_current(gl_render_window_t* bundle);
 void gl_swap_buffers();
 void gl_setup_window();
 void gl_swap_interval(int swapInterval);
+void gl_release_gpu_guards(void);
 
 
 #endif //POJAVLAUNCHER_GL_BRIDGE_H

@@ -21,6 +21,15 @@
         android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginTop="4dp" android:text="@string/qv_download_note" android:textSize="12sp"
         app:auto_text_tint="true" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:layout_marginTop="4dp" android:gravity="center_vertical">
+        <com.tungsten.fcllibrary.component.view.FCLTextView
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/qv_download_source" app:auto_text_tint="true" />
+        <com.tungsten.fcllibrary.component.view.FCLSpinner
+            android:id="@+id/qv_source" android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:layout_marginStart="8dp" />
+    </LinearLayout>
     <com.tungsten.fcllibrary.component.view.FCLTextView
         android:id="@+id/qv_status" android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginTop="8dp" android:textSize="14sp" app:auto_text_tint="true" />

@@ -1,7 +1,11 @@
+// Modified for FCL Quest VR on 2026-11-06: EGL lookup and attribute handling.
 // Reference AAMC: https://github.com/AngelAuraMC/Amethyst-Android/blob/360d708262ff703d9b52782d20cd348410a33df5/app_pojavlauncher/src/main/jni/native_hooks/sdl_hook.c
 // 移植自 ZalithLauncher2 feat/sdl3，SDL3 集成核心 hook
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 
 #include "environ/environ.h"
 #include "utils.h"
@@ -73,11 +77,6 @@ DECL_DLSYM(SDL_CreateWindow)
 DECL_DLSYM(SDL_CreateWindowWithProperties)
 DECL_DLSYM(SDL_DestroyWindow)
 
-typedef void *EGLDisplay;
-typedef void *EGLConfig;
-typedef int EGLint;
-typedef int EGLBoolean;
-
 typedef EGLBoolean (*eglChooseConfig_t)(EGLDisplay dpy, const EGLint *attrib_list,
                                         EGLConfig *configs,
                                         EGLint config_size, EGLint *num_config);
@@ -86,18 +85,6 @@ typedef void *(*eglCreateContext_t)(EGLDisplay dpy, EGLConfig config, void *shar
                                     const EGLint *attrib_list);
 
 typedef EGLBoolean (*eglSwapBuffers_t)(EGLDisplay dpy, void *surface);
-
-// EGL 常量（EGL/egl.h），避免引入完整 EGL 头
-#define EGL_NONE              0x3038
-#define EGL_RENDERABLE_TYPE   0x3040
-#define EGL_OPENGL_BIT        0x0008
-#define EGL_OPENGL_ES2_BIT    0x0004
-#define EGL_OPENGL_ES3_BIT    0x0040
-#define EGL_CONTEXT_CLIENT_VERSION    0x3098
-#define EGL_CONTEXT_MAJOR_VERSION_KHR 0x30FB
-#define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FC
-
-
 
 // --- SDL 事件窗口解析修正 ---
 
@@ -139,17 +126,16 @@ static SDL_Window *custom_SDL_GetWindowFromID_Func(uint32_t id) {
 // 统一归一化为 ES2_BIT 以放宽 config 匹配；实际上下文版本由后续的
 // EGL_CONTEXT_CLIENT_VERSION 决定，不受影响。
 static EGLBoolean normalizeEglChooseConfigList(const EGLint *attrib_list, EGLint *fixed, int cap) {
-    if (attrib_list == NULL) return 0;
+    if (attrib_list == NULL || cap < 1) return 0;
     int n = 0;
-    for (int i = 0; n < cap - 2; i += 2) {
+    for (int i = 0; ; i += 2) {
         EGLint attr = attrib_list[i];
-        EGLint val = attrib_list[i + 1];
         if (attr == EGL_NONE) {
             fixed[n] = EGL_NONE;
-            fixed[n + 1] = 0;
-            n += 2;
-            break;
+            return 1;
         }
+        if (n > cap - 3) return 0;
+        EGLint val = attrib_list[i + 1];
         if (attr == EGL_RENDERABLE_TYPE) {
             if ((val & (EGL_OPENGL_ES3_BIT | EGL_OPENGL_BIT)) != 0 &&
                 (val & EGL_OPENGL_ES2_BIT) == 0) {
@@ -160,61 +146,59 @@ static EGLBoolean normalizeEglChooseConfigList(const EGLint *attrib_list, EGLint
         fixed[n + 1] = val;
         n += 2;
     }
-    return n > 0;
 }
 
-// 部分宿主 libEGL 不识别 EGL_CONTEXT_MAJOR/MINOR_VERSION_KHR，
-// 属性表携带即报 EGL_BAD_ATTRIBUTE。此处将其剔除，仅保留 CLIENT_VERSION：
-// 对 "≥3.0" 类请求，驱动本就返回其支持的最高 3.x 版本，语义不变。
-// 返回请求的主版本号供降级重试使用（无版本属性时为 0）。
-static int normalizeEglContextAttribs(const EGLint *attrib_list, EGLint *fixed, int cap) {
-    int version = 0;
-    if (attrib_list == NULL) return 0;
+// Desktop GL minor versions and forward-compatible flags do not describe GLES contexts.
+static EGLBoolean normalizeEglContextAttribs(const EGLint *attrib_list, EGLint *fixed,
+                                             int cap, int *version) {
+    *version = 0;
+    if (attrib_list == NULL || cap < 1) return 0;
+    int requestedVersion = 0;
     int n = 0;
-    for (int i = 0; n < cap - 2; i += 2) {
+    for (int i = 0; ; i += 2) {
         EGLint attr = attrib_list[i];
-        EGLint val = attrib_list[i + 1];
         if (attr == EGL_NONE) {
             fixed[n] = EGL_NONE;
-            fixed[n + 1] = 0;
-            n += 2;
-            break;
+            *version = requestedVersion;
+            return 1;
         }
-        if (attr == EGL_CONTEXT_MAJOR_VERSION_KHR) {
-            // 版本信息并入 CLIENT_VERSION 后丢弃本项
-            if (version == 0) version = val;
-            continue;
-        }
+        EGLint val = attrib_list[i + 1];
         if (attr == EGL_CONTEXT_MINOR_VERSION_KHR) continue;
-        if (attr == EGL_CONTEXT_CLIENT_VERSION && version == 0) version = val;
+        if (attr == EGL_CONTEXT_FLAGS_KHR) {
+            val &= ~EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR;
+            if (val == 0) continue;
+        }
+        if (n > cap - 3) return 0;
+        if (attr == EGL_CONTEXT_CLIENT_VERSION) requestedVersion = val;
         fixed[n] = attr;
         fixed[n + 1] = val;
         n += 2;
     }
-    return version;
 }
 
 // --- SDL 的 EGL 函数解析接管 ---
 // SDL 经 SDL_LoadFunction 取得 EGL 函数指针后直接调用（不走 PLT），
 // 故在其解析 eglChooseConfig/eglCreateContext 时注入代理，
 // 使上述归一化对所有调用路径生效。
-static eglChooseConfig_t sOrigEglChooseConfig = NULL;
-static eglCreateContext_t sOrigEglCreateContext = NULL;
-static eglSwapBuffers_t sOrigEglSwapBuffers = NULL;
+static _Atomic(void *) sOrigEglChooseConfig;
+static _Atomic(void *) sOrigEglCreateContext;
+static _Atomic(void *) sOrigEglSwapBuffers;
 
 static void *
 proxyEglCreateContext(EGLDisplay dpy, EGLConfig config, void *share, const EGLint *attrib_list) {
     EGLint fixed[64];
     const EGLint *use_list = attrib_list;
-    int version = normalizeEglContextAttribs(attrib_list, fixed, 64);
-    if (version > 0) use_list = fixed;
+    int version;
+    if (normalizeEglContextAttribs(attrib_list, fixed, 64, &version)) use_list = fixed;
 
-    void *ctx = sOrigEglCreateContext(dpy, config, share, use_list);
+    eglCreateContext_t createContext = (eglCreateContext_t) atomic_load_explicit(
+            &sOrigEglCreateContext, memory_order_acquire);
+    void *ctx = createContext(dpy, config, share, use_list);
     if (ctx == NULL && version > 2) {
         // ES3 上下文创建失败时的降级重试
         LOG_TO_W("SDL_Hook: eglCreateContext failed with CV=%d, retrying with CV=2", version);
         EGLint es2[3] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-        ctx = sOrigEglCreateContext(dpy, config, share, es2);
+        ctx = createContext(dpy, config, share, es2);
     }
     return ctx;
 }
@@ -228,37 +212,47 @@ proxyEglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig *confi
     if (normalizeEglChooseConfigList(attrib_list, fixed, 64)) {
         use_list = fixed;
     }
-    return sOrigEglChooseConfig(dpy, use_list, configs, config_size, num_config);
+    eglChooseConfig_t chooseConfig = (eglChooseConfig_t) atomic_load_explicit(
+            &sOrigEglChooseConfig, memory_order_acquire);
+    return chooseConfig(dpy, use_list, configs, config_size, num_config);
 }
 
 static EGLBoolean proxyEglSwapBuffers(EGLDisplay dpy, void *surface) {
     calculateFPS();
-    return sOrigEglSwapBuffers(dpy, surface);
+    eglSwapBuffers_t swapBuffers = (eglSwapBuffers_t) atomic_load_explicit(
+            &sOrigEglSwapBuffers, memory_order_acquire);
+    return swapBuffers(dpy, surface);
 }
 
-// 接管 SDL 的 EGL 函数解析，注入上述代理
+static void *wrapSdlEglFunction(const char *name, void *result) {
+    if (name == NULL || result == NULL) return result;
+    _Atomic(void *) *original;
+    void *proxy;
+    if (strcmp(name, "eglChooseConfig") == 0) {
+        original = &sOrigEglChooseConfig;
+        proxy = (void *) proxyEglChooseConfig;
+    } else if (strcmp(name, "eglCreateContext") == 0) {
+        original = &sOrigEglCreateContext;
+        proxy = (void *) proxyEglCreateContext;
+    } else if (strcmp(name, "eglSwapBuffers") == 0) {
+        original = &sOrigEglSwapBuffers;
+        proxy = (void *) proxyEglSwapBuffers;
+    } else {
+        return result;
+    }
+    if (result == proxy) return result;
+    void *expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(original, &expected, result,
+            memory_order_acq_rel, memory_order_acquire) || expected == result) {
+        return proxy;
+    }
+    return result;
+}
+
 static void *custom_SDL_LoadFunction_Func(void *handle, const char *name) {
     void *r = BYTEHOOK_CALL_PREV(custom_SDL_LoadFunction_Func, SDL_LoadFunction_t, handle, name);
     BYTEHOOK_POP_STACK();
-    if (name != NULL) {
-        if (strcmp(name, "eglChooseConfig") == 0) {
-            if (sOrigEglChooseConfig == NULL && r != NULL) {
-                sOrigEglChooseConfig = (eglChooseConfig_t) r;
-            }
-            r = (void *) proxyEglChooseConfig;
-        } else if (strcmp(name, "eglCreateContext") == 0) {
-            if (sOrigEglCreateContext == NULL && r != NULL) {
-                sOrigEglCreateContext = (eglCreateContext_t) r;
-            }
-            r = (void *) proxyEglCreateContext;
-        } else if (strcmp(name, "eglSwapBuffers") == 0) {
-            if (sOrigEglSwapBuffers == NULL && r != NULL) {
-                sOrigEglSwapBuffers = (eglSwapBuffers_t) r;
-            }
-            r = (void *) proxyEglSwapBuffers;
-        }
-    }
-    return r;
+    return wrapSdlEglFunction(name, r);
 }
 
 // --- Vulkan 加载器一致性 ---
@@ -569,25 +563,7 @@ static void *proxy_SDL_LoadObject(const char *path) {
 
 static void *proxy_SDL_LoadFunction(void *handle, const char *name) {
     void *result = realSdlLoadFunction(handle, name);
-    if (name != NULL) {
-        if (strcmp(name, "eglChooseConfig") == 0) {
-            if (sOrigEglChooseConfig == NULL && result != NULL) {
-                sOrigEglChooseConfig = (eglChooseConfig_t) result;
-            }
-            result = (void *) proxyEglChooseConfig;
-        } else if (strcmp(name, "eglCreateContext") == 0) {
-            if (sOrigEglCreateContext == NULL && result != NULL) {
-                sOrigEglCreateContext = (eglCreateContext_t) result;
-            }
-            result = (void *) proxyEglCreateContext;
-        } else if (strcmp(name, "eglSwapBuffers") == 0) {
-            if (sOrigEglSwapBuffers == NULL && result != NULL) {
-                sOrigEglSwapBuffers = (eglSwapBuffers_t) result;
-            }
-            result = (void *) proxyEglSwapBuffers;
-        }
-    }
-    return result;
+    return wrapSdlEglFunction(name, result);
 }
 
 static void proxy_SDL_UnloadObject(void *handle) {

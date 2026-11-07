@@ -28,6 +28,8 @@ import com.mio.JavaManager;
 import com.mio.data.Renderer;
 import com.mio.plugin.MioLibPatcherManager;
 import com.mio.plugin.NativeLibPlugin;
+import com.mio.plugin.RendererPlugin;
+import com.tungsten.fcl.vr.QuestVrPreferences;
 import com.tungsten.fcl.vr.QuestVrRuntime;
 import com.tungsten.fclauncher.FCLConfig;
 import com.tungsten.fclauncher.FCLauncher;
@@ -87,6 +89,11 @@ public class DefaultLauncher {
     private boolean vrEnabled = false;
     private Integer vrRenderScalePercent;
     private Boolean vrFsaaEnabled;
+    private boolean vrStereoSyncEnabled = true;
+
+    public void setVrStereoSyncEnabled(boolean enabled) {
+        vrStereoSyncEnabled = enabled;
+    }
 
     public void setVrGraphicsSettings(Integer renderScalePercent, Boolean fsaaEnabled) {
         vrRenderScalePercent = renderScalePercent;
@@ -453,6 +460,7 @@ public class DefaultLauncher {
     }
 
     public FCLBridge launch() throws IOException, InterruptedException {
+        String minecraft = repository.getGameVersion(version).orElse(null);
         if (vrEnabled) {
             QuestVrRuntime.install(context);
         }
@@ -472,7 +480,7 @@ public class DefaultLauncher {
 
         String[] finalArgs = rawCommandLine.toArray(new String[0]);
 
-        LibraryAnalyzer analyzer = LibraryAnalyzer.analyze(version, repository.getGameVersion(version).orElse(null));
+        LibraryAnalyzer analyzer = LibraryAnalyzer.analyze(version, minecraft);
 
         Renderer renderer = options.getRenderer();
         FCLConfig config = new FCLConfig(
@@ -484,6 +492,7 @@ public class DefaultLauncher {
                 finalArgs
         );
         config.setUseVKDriverSystem(options.isVKDriverSystem());
+        config.setSfpewLayerEnabled(!vrEnabled && RendererPlugin.isSfpewLayerEnabled(renderer, minecraft));
         config.setInstalledModLoaders(new FCLConfig.InstalledModLoaders(
                 analyzer.has(LibraryAnalyzer.LibraryType.FORGE),
                 analyzer.has(LibraryAnalyzer.LibraryType.CLEANROOM),
@@ -495,6 +504,8 @@ public class DefaultLauncher {
         ));
         config.setLwjglVersion(lwjglVersion);
         config.setVrEnabled(vrEnabled);
+        config.setVrStereoSyncEnabled(vrStereoSyncEnabled);
+        config.setHighGameThreadPriority(QuestVrPreferences.isHighGameThreadPriorityEnabled(context));
         return FCLauncher.launchMinecraft(config);
     }
 

@@ -111,7 +111,7 @@ gl_render_window_t *gl_init_context(gl_render_window_t *share) {
     int libgl_es = libgl_es_str != NULL ? (int) strtol(libgl_es_str, NULL, 0) : 2;
     if (libgl_es < 0 || libgl_es > INT16_MAX) libgl_es = 2;
     const EGLint egl_context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, libgl_es, EGL_NONE};
-    bundle->context = eglCreateContext_p(g_EglDisplay, bundle->config,
+    bundle->context = quest_gpu_create_context(g_EglDisplay, bundle->config,
                                          share == NULL ? EGL_NO_CONTEXT : share->context,
                                          egl_context_attributes);
 
@@ -122,6 +122,7 @@ gl_render_window_t *gl_init_context(gl_render_window_t *share) {
         free(bundle);
         return NULL;
     }
+    quest_gpu_guard_init(&bundle->gpu_guard, g_EglDisplay, bundle->context);
     return bundle;
 }
 
@@ -207,6 +208,7 @@ void gl_make_current(gl_render_window_t *bundle) {
 }
 
 void gl_swap_buffers() {
+    if (currentBundle == NULL) return;
     if (currentBundle->state == STATE_RENDERER_NEW_WINDOW) {
         bridge_eglMakeCurrent(g_EglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE,
                               EGL_NO_CONTEXT); //detach everything to destroy the old EGLSurface
@@ -227,6 +229,11 @@ void gl_swap_buffers() {
                                 "The window has died, awaiting window change");
         }
 
+    quest_gpu_guard_frame(&currentBundle->gpu_guard);
+}
+
+void gl_release_gpu_guards(void) {
+    quest_gpu_guard_release_display(g_EglDisplay);
 }
 
 void gl_setup_window() {

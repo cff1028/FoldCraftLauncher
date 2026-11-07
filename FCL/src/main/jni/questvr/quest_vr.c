@@ -25,8 +25,18 @@ typedef struct {
     bool flat_frame_notified;
 } quest_vr_window;
 
-static bool update_surface(gl_render_window_t *bundle) {
-    if (bundle != vr_primary) return false;
+static void release_flat_surface(quest_vr_window *window) {
+    quest_gpu_guard_release(&window->base.gpu_guard);
+    eglDestroySurface_p(vr_display, window->window_surface);
+    ANativeWindow_release(window->base.nativeSurface);
+    window->base.nativeSurface = NULL;
+    window->base.surface = window->pbuffer;
+    window->window_surface = EGL_NO_SURFACE;
+    window->flat_frame_notified = false;
+}
+
+static bool prepare_swap_surface(gl_render_window_t *bundle) {
+    if (bundle != vr_primary) return true;
     quest_vr_window *window = (quest_vr_window *) bundle;
     quest_vr_presentation desired;
     quest_vr_get_presentation(&desired);
@@ -39,12 +49,7 @@ static bool update_surface(gl_render_window_t *bundle) {
             if (desired.window) ANativeWindow_release(desired.window);
             return false;
         }
-        bundle->surface = window->pbuffer;
-        eglDestroySurface_p(vr_display, window->window_surface);
-        window->window_surface = EGL_NO_SURFACE;
-        ANativeWindow_release(bundle->nativeSurface);
-        bundle->nativeSurface = NULL;
-        window->flat_frame_notified = false;
+        release_flat_surface(window);
         changed = true;
         VR_LOG("Minecraft context retained; presenting to the XR pbuffer");
     }
@@ -61,6 +66,7 @@ static bool update_surface(gl_render_window_t *bundle) {
             bundle->nativeSurface = desired.window;
             desired.window = NULL;
             eglSwapInterval_p(vr_display, flat_swap_interval);
+            quest_gpu_guard_init(&bundle->gpu_guard, vr_display, bundle->context);
             window->flat_frame_notified = false;
             changed = true;
             VR_LOG("Minecraft context retained; presenting to the flat game panel");
@@ -71,7 +77,7 @@ static bool update_surface(gl_render_window_t *bundle) {
         }
     }
     if (desired.window) ANativeWindow_release(desired.window);
-    return changed;
+    return !changed;
 }
 
 bool quest_vr_enabled(void) {
@@ -125,7 +131,7 @@ gl_render_window_t *quest_vr_init_context(gl_render_window_t *share) {
         return NULL;
     }
     const EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    bundle->context = eglCreateContext_p(vr_display, bundle->config,
+    bundle->context = quest_gpu_create_context(vr_display, bundle->config,
                                         share ? share->context : EGL_NO_CONTEXT,
                                         context_attributes);
     if (bundle->context == EGL_NO_CONTEXT) {
@@ -166,7 +172,7 @@ void quest_vr_make_current(gl_render_window_t *bundle) {
         return;
     }
     vr_current = bundle;
-    update_surface(bundle);
+    prepare_swap_surface(bundle);
     eglSwapInterval_p(vr_display, ((quest_vr_window *) bundle)->window_surface != EGL_NO_SURFACE
                      ? flat_swap_interval : 0);
 }
@@ -174,7 +180,10 @@ void quest_vr_make_current(gl_render_window_t *bundle) {
 void quest_vr_swap_buffers(void) {
     if (!vr_current) return;
     if (vr_current == vr_primary) quest_vr_notify_game_frame();
-    if (update_surface(vr_current)) { glFlush(); return; }
+    if (!prepare_swap_surface(vr_current)) {
+        glFlush();
+        return;
+    }
     quest_vr_window *window = (quest_vr_window *) vr_current;
     if (window->window_surface != EGL_NO_SURFACE) {
         if (eglSwapBuffers_p(vr_display, window->window_surface)) {
@@ -182,16 +191,12 @@ void quest_vr_swap_buffers(void) {
                 window->flat_frame_notified = true;
                 quest_vr_notify_flat_frame();
             }
+            quest_gpu_guard_frame(&vr_current->gpu_guard);
         } else {
             VR_ERROR("Flat game panel swap failed: 0x%x", eglGetError_p());
             if (eglMakeCurrent_p(vr_display, window->pbuffer, window->pbuffer, vr_current->context)) {
-                vr_current->surface = window->pbuffer;
-                eglDestroySurface_p(vr_display, window->window_surface);
-                window->window_surface = EGL_NO_SURFACE;
-                ANativeWindow_release(vr_current->nativeSurface);
-                vr_current->nativeSurface = NULL;
+                release_flat_surface(window);
                 window->window_failed = true;
-                window->flat_frame_notified = false;
             }
         }
     } else {
@@ -201,6 +206,7 @@ void quest_vr_swap_buffers(void) {
 
 void quest_vr_setup_window(void) {                                                       }
 void quest_vr_swap_interval(int interval) {
+    if (quest_gpu_guard_enabled() && interval < 1) interval = 1;
     flat_swap_interval = interval;
     if (vr_current && ((quest_vr_window *) vr_current)->window_surface != EGL_NO_SURFACE)
         eglSwapInterval_p(vr_display, interval);
@@ -213,8 +219,7 @@ void quest_vr_terminate(void) {
     eglMakeCurrent_p(vr_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     vr_current = NULL;
     if (window->window_surface != EGL_NO_SURFACE)
-        eglDestroySurface_p(vr_display, window->window_surface);
-    if (bundle->nativeSurface) ANativeWindow_release(bundle->nativeSurface);
+        release_flat_surface(window);
     eglDestroySurface_p(vr_display, window->pbuffer);
     eglDestroyContext_p(vr_display, bundle->context);
     if (vr_primary == bundle) vr_primary = NULL;

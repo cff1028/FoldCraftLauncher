@@ -1,0 +1,1150 @@
+--- a/MobileGlues-cpp/CMakeLists.txt
++++ b/MobileGlues-cpp/CMakeLists.txt
+@@ -1,3 +1,4 @@
++# Modified for FCL Quest VR on 2026-11-06: build shared shader-default tracking.
+ cmake_minimum_required(VERSION 3.22.1)
+ project("mobileglues")
+ enable_language(CXX)
+@@ -96,6 +97,7 @@
+     gl/log.cpp
+     gl/program.cpp
+     gl/shader.cpp
++    gl/shader_defaults.cpp
+     gl/framebuffer.cpp
+     gl/texture.cpp
+     gl/drawing.cpp
+--- a/MobileGlues-cpp/egl/context.h
++++ b/MobileGlues-cpp/egl/context.h
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-06: context errors and shared shader-default state.
+ // MobileGlues - egl/context.h
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -35,7 +36,10 @@
+ // context that never owned the cached objects.
+ // ---------------------------------------------------------------------------
+ 
++struct mg_shader_defaults_state;
++
+ struct MGShareGroup {
++    std::shared_ptr<mg_shader_defaults_state> shader_defaults;
+     unsigned long long id;
+     // Objects GL shares across a share group -- buffers, textures, renderbuffers,
+     // samplers, shaders, programs, syncs -- belong here. They are still
+@@ -60,6 +64,10 @@
+     EGLSurface read;
+     int current_count;     // how many threads have this current
+     bool destroy_pending;  // eglDestroyContext was called while still current
++    // Strict errors raised by the shader-source boundary. Keep these on the
++    // context, so moving a context to another thread preserves its error and
++    // switching contexts on one thread does not leak it into an unrelated one.
++    GLenum shader_source_error = GL_NO_ERROR;
+ };
+ 
+ // The context current on THIS thread, or nullptr. EGL scopes the current context
+--- a/MobileGlues-cpp/gl/getter.cpp
++++ b/MobileGlues-cpp/gl/getter.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-10-31: shader-source API correctness and error handling.
+ // MobileGlues - gl/getter.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -19,6 +20,7 @@
+ #include "mg.h"
+ #include "pixel.h"
+ #include "random_string_gen.h"
++#include "shader.h"
+ #include "../config/settings.h"
+ 
+ #define DEBUG 0
+@@ -182,13 +184,21 @@
+ 
+ GLenum glGetError() {
+     LOG()
++    const GLenum shader_error = mg_take_shader_source_error();
++    if (shader_error != GL_NO_ERROR) {
++        // Do not read either pre-existing error channel while returning this
++        // error. In particular, GLES.glGetError() would consume a driver error
++        // unrelated to the rejected shader submission.
++        return global_settings.ignore_error == IgnoreErrorLevel::None ? shader_error : GL_NO_ERROR;
++    }
+     // Both are consumed whether or not they get reported: leaving either latched
+     // would hand it to a later, unrelated glGetError.
+     const GLenum backend = GLES.glGetError();
+     const GLenum frontend = g_frontend_error;
+     g_frontend_error = GL_NO_ERROR;
+ 
+-    // GL_NO_ERROR, always, in every configuration and whatever ignoreError says.
++    // Preserve the legacy GL_NO_ERROR policy for unrelated frontend/backend
++    // errors. The strict shader-submission channel above is handled separately.
+     //
+     // Deliberate, and not the same thing as not knowing. This layer emulates
+     // enough of desktop GL on top of GLES that a faithfully forwarded error is
+--- a/MobileGlues-cpp/gl/gl_native.cpp
++++ b/MobileGlues-cpp/gl/gl_native.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-06: track shader-default lifetimes.
+ // MobileGlues - gl/gl_native.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -35,7 +36,6 @@
+ NATIVE_FUNCTION_HEAD(void, glClearDepthf, GLfloat d) NATIVE_FUNCTION_END_NO_RETURN(void, glClearDepthf, d)
+ NATIVE_FUNCTION_HEAD(void, glClearStencil, GLint s) NATIVE_FUNCTION_END_NO_RETURN(void, glClearStencil, s)
+ NATIVE_FUNCTION_HEAD(void, glColorMask, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) NATIVE_FUNCTION_END_NO_RETURN(void, glColorMask, red,green,blue,alpha)
+-NATIVE_FUNCTION_HEAD(void, glCompileShader, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glCompileShader, shader)
+ NATIVE_FUNCTION_HEAD(void, glCompressedTexImage2D, GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glCompressedTexImage2D, target,level,internalformat,width,height,border,imageSize,data)
+ NATIVE_FUNCTION_HEAD(void, glCompressedTexSubImage2D, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glCompressedTexSubImage2D, target,level,xoffset,yoffset,width,height,format,imageSize,data)
+ //NATIVE_FUNCTION_HEAD(void, glCopyTexImage2D, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) NATIVE_FUNCTION_END_NO_RETURN(void, glCopyTexImage2D, target,level,internalformat,x,y,width,height,border)
+@@ -45,14 +45,11 @@
+ NATIVE_FUNCTION_HEAD(void, glCullFace, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glCullFace, mode)
+ //NATIVE_FUNCTION_HEAD(void, glDeleteBuffers, GLsizei n, const GLuint *buffers) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteBuffers, n,buffers)
+ // NATIVE_FUNCTION_HEAD(void, glDeleteFramebuffers, GLsizei n, const GLuint *framebuffers) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteFramebuffers, n,framebuffers)   // implemented in gl/framebuffer.cpp
+-NATIVE_FUNCTION_HEAD(void, glDeleteProgram, GLuint program) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteProgram, program)
+ NATIVE_FUNCTION_HEAD(void, glDeleteRenderbuffers, GLsizei n, const GLuint *renderbuffers) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteRenderbuffers, n,renderbuffers)
+-NATIVE_FUNCTION_HEAD(void, glDeleteShader, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteShader, shader)
+ //NATIVE_FUNCTION_HEAD(void, glDeleteTextures, GLsizei n, const GLuint *textures) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteTextures, n,textures)
+ NATIVE_FUNCTION_HEAD(void, glDepthFunc, GLenum func) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthFunc, func)
+ NATIVE_FUNCTION_HEAD(void, glDepthMask, GLboolean flag) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthMask, flag)
+ NATIVE_FUNCTION_HEAD(void, glDepthRangef, GLfloat n, GLfloat f) NATIVE_FUNCTION_END_NO_RETURN(void, glDepthRangef, n,f)
+-NATIVE_FUNCTION_HEAD(void, glDetachShader, GLuint program, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glDetachShader, program,shader)
+ // NATIVE_FUNCTION_HEAD(void, glDisable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glDisable, cap)   // moved to gl/enable.cpp (virtual enable state table)
+ NATIVE_FUNCTION_HEAD(void, glDisableVertexAttribArray, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glDisableVertexAttribArray, index)
+ NATIVE_FUNCTION_HEAD(void, glDrawArrays, GLenum mode, GLint first, GLsizei count) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawArrays, mode,first,count)
+--- a/MobileGlues-cpp/gl/program.cpp
++++ b/MobileGlues-cpp/gl/program.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-06: apply compiled defaults without changing the current program.
+ // MobileGlues - gl/program.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -16,12 +17,13 @@
+ #include <iostream>
+ #include "../config/settings.h"
+ #include "drawing.h"
+-#include "glsl/uniform_defaults.h"
++#include "shader_defaults.h"
++#include <new>
++#include <stdexcept>
+ 
+ #define DEBUG 0
+ 
+ extern UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
+-extern UnorderedMap<GLuint, std::vector<uniform_default_t>> shader_uniform_defaults;
+ UnorderedMap<GLuint, bool> program_map_is_sampler_buffer_emulated;
+ 
+ enum class ShouldGenerateFSState : int {
+@@ -97,210 +99,82 @@
+     }
+ }
+ 
+-// One glUniform*v call for one stripped initialiser. `values` is laid out the way
+-// the GL call wants it: elements in order, each column-major.
+-static void set_uniform_default(GLint location, const uniform_default_t& d) {
+-    const size_t n = d.values.size();
+-    if (n != static_cast<size_t>(d.rows) * static_cast<size_t>(d.columns) * static_cast<size_t>(d.count)) return;
+-    const GLsizei count = d.count;
+-
+-    if (d.base == uniform_base_t::Float) {
+-        std::vector<GLfloat> v(n);
+-        for (size_t k = 0; k < n; ++k)
+-            v[k] = static_cast<GLfloat>(d.values[k]);
+-        if (d.columns == 1) {
+-            switch (d.rows) {
+-            case 1:
+-                GLES.glUniform1fv(location, count, v.data());
+-                return;
+-            case 2:
+-                GLES.glUniform2fv(location, count, v.data());
+-                return;
+-            case 3:
+-                GLES.glUniform3fv(location, count, v.data());
+-                return;
+-            case 4:
+-                GLES.glUniform4fv(location, count, v.data());
+-                return;
+-            default:
+-                return;
+-            }
+-        }
+-        switch (d.columns * 10 + d.rows) {
+-        case 22:
+-            GLES.glUniformMatrix2fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 33:
+-            GLES.glUniformMatrix3fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 44:
+-            GLES.glUniformMatrix4fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 23:
+-            GLES.glUniformMatrix2x3fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 32:
+-            GLES.glUniformMatrix3x2fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 24:
+-            GLES.glUniformMatrix2x4fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 42:
+-            GLES.glUniformMatrix4x2fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 34:
+-            GLES.glUniformMatrix3x4fv(location, count, GL_FALSE, v.data());
+-            return;
+-        case 43:
+-            GLES.glUniformMatrix4x3fv(location, count, GL_FALSE, v.data());
+-            return;
+-        default:
+-            return;
+-        }
+-    }
+-
+-    if (d.base == uniform_base_t::Uint) {
+-        std::vector<GLuint> v(n);
+-        for (size_t k = 0; k < n; ++k)
+-            v[k] = static_cast<GLuint>(d.values[k]);
+-        switch (d.rows) {
+-        case 1:
+-            GLES.glUniform1uiv(location, count, v.data());
+-            return;
+-        case 2:
+-            GLES.glUniform2uiv(location, count, v.data());
+-            return;
+-        case 3:
+-            GLES.glUniform3uiv(location, count, v.data());
+-            return;
+-        case 4:
+-            GLES.glUniform4uiv(location, count, v.data());
+-            return;
+-        default:
+-            return;
+-        }
+-    }
+-
+-    // Int, and Bool, which GL sets through the integer entry points.
+-    std::vector<GLint> v(n);
+-    for (size_t k = 0; k < n; ++k)
+-        v[k] = static_cast<GLint>(d.values[k]);
+-    switch (d.rows) {
+-    case 1:
+-        GLES.glUniform1iv(location, count, v.data());
+-        return;
+-    case 2:
+-        GLES.glUniform2iv(location, count, v.data());
+-        return;
+-    case 3:
+-        GLES.glUniform3iv(location, count, v.data());
+-        return;
+-    case 4:
+-        GLES.glUniform4iv(location, count, v.data());
+-        return;
+-    default:
+-        return;
+-    }
+-}
+-
+-// Desktop GL gives a uniform its initialiser when the program links; ESSL has no
+-// initialisers, so the translated shaders reported theirs and they are set here,
+-// right after the link and before the application can touch the program. A
+-// uniform the driver optimised away has no location and is skipped. The GL
+-// uniform entry points act on the current program, so it is switched and put
+-// back through the driver directly: this layer's own tracking is not touched.
+-static void apply_uniform_defaults(GLuint program) {
+-    if (shader_uniform_defaults.empty()) return;
+-    GLint linked = 0;
+-    GLES.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+-    if (!linked) return;
+-
+-    GLuint shaders[8] = {};
+-    GLsizei attached = 0;
+-    GLES.glGetAttachedShaders(program, 8, &attached, shaders);
+-
+-    GLint previous = -1;
+-    for (GLsizei s = 0; s < attached; ++s) {
+-        const auto it = shader_uniform_defaults.find(shaders[s]);
+-        if (it == shader_uniform_defaults.end() || it->second.empty()) continue;
+-        if (previous < 0) {
+-            GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &previous);
+-            GLES.glUseProgram(program);
+-        }
+-        for (const auto& d : it->second) {
+-            GLint location = GLES.glGetUniformLocation(program, d.name.c_str());
+-            // An array may be listed under its first element's name.
+-            if (location < 0) location = GLES.glGetUniformLocation(program, (d.name + "[0]").c_str());
+-            if (location < 0) {
+-                LOG_D("uniform default: %s is not active in program %u, skipped", d.name.c_str(), program)
+-                continue;
+-            }
+-            LOG_D("uniform default: %s -> location %d in program %u", d.name.c_str(), location, program)
+-            set_uniform_default(location, d);
+-        }
+-    }
+-    if (previous >= 0) GLES.glUseProgram(static_cast<GLuint>(previous));
+-}
+-
+ static UnorderedMap<unsigned, GLuint> DefaultFSMap; // essl version <-> shader id
+ void glLinkProgram(GLuint program) {
+-    LOG()
+-
+-    LOG_D("glLinkProgram(%d)", program)
+-    if (!shaderInfo.converted.empty() && shaderInfo.frag_data_changed) {
+-        const GLchar* patched = shaderInfo.frag_data_changed_converted.c_str();
+-        GLES.glShaderSource(shaderInfo.id, 1, &patched, nullptr);
+-        GLES.glCompileShader(shaderInfo.id);
+-        GLint status = 0;
+-        GLES.glGetShaderiv(shaderInfo.id, GL_COMPILE_STATUS, &status);
+-        if (status != GL_TRUE) {
+-            char tmp[500];
+-            GLES.glGetShaderInfoLog(shaderInfo.id, 500, nullptr, tmp);
+-            LOG_E("Failed to compile patched shader, log:\n%s", tmp)
+-        }
+-        GLES.glDetachShader(program, shaderInfo.id);
+-        GLES.glAttachShader(program, shaderInfo.id);
+-        CHECK_GL_ERROR
+-    }
+-    shaderInfo.id = 0;
+-    shaderInfo.converted = "";
+-    shaderInfo.frag_data_changed_converted.clear();
+-    shaderInfo.frag_data_changed = 0;
+-
+-    // Generate defaut fragment shader if needed
+-    if (program_map_should_generate_fs[program] == ShouldGenerateFSState::Maybe) {
+-        GenerateDefaultFSSource();
+-        GLuint& default_fs = DefaultFSMap[CurrentDefaultFSSourceVersion];
+-        if (!default_fs) {
+-            default_fs = GLES.glCreateShader(GL_FRAGMENT_SHADER);
+-            const char* src = DefaultFSSource.c_str();
+-            GLES.glShaderSource(default_fs, 1, &src, nullptr);
+-
+-            GLES.glCompileShader(default_fs);
+-
+-            GLint success = 0;
+-            GLES.glGetShaderiv(default_fs, GL_COMPILE_STATUS, &success);
+-            if (!success) {
+-                GLint logLength = 0;
+-                GLES.glGetShaderiv(default_fs, GL_INFO_LOG_LENGTH, &logLength);
+-                std::vector<char> log(logLength);
+-                GLES.glGetShaderInfoLog(default_fs, logLength, nullptr, log.data());
+-                LOG_E("Default fragment shader compile error for program %u :\n%s\n", program, log.data());
+-                GLES.glDeleteShader(default_fs);
+-                default_fs = 0;
+-            }
+-        }
+-
+-        if (default_fs) {
+-            LOG_D("Try to attach missing default FS for program %u...", program);
+-            GLES.glAttachShader(program, default_fs);
+-        }
+-    }
+-
+-    GLES.glLinkProgram(program);
+-    apply_uniform_defaults(program);
+-
+-    CHECK_GL_ERROR
++    if (!GLES.glIsProgram(program)) {
++        GLES.glLinkProgram(program);
++        return;
++    }
++    try {
++        LOG()
++
++        LOG_D("glLinkProgram(%d)", program)
++        if (!shaderInfo.converted.empty() && shaderInfo.frag_data_changed) {
++            const GLchar* patched = shaderInfo.frag_data_changed_converted.c_str();
++            GLES.glShaderSource(shaderInfo.id, 1, &patched, nullptr);
++            const auto update = mg_snapshot_shader_defaults(shaderInfo.id);
++            GLES.glCompileShader(shaderInfo.id);
++            GLint status = 0;
++            GLES.glGetShaderiv(shaderInfo.id, GL_COMPILE_STATUS, &status);
++            if (status == GL_TRUE) mg_commit_compiled_defaults(update);
++            if (status != GL_TRUE) {
++                char tmp[500];
++                GLES.glGetShaderInfoLog(shaderInfo.id, 500, nullptr, tmp);
++                LOG_E("Failed to compile patched shader, log:\n%s", tmp)
++            }
++            GLES.glDetachShader(program, shaderInfo.id);
++            GLES.glAttachShader(program, shaderInfo.id);
++        }
++        shaderInfo.id = 0;
++        shaderInfo.converted = "";
++        shaderInfo.frag_data_changed_converted.clear();
++        shaderInfo.frag_data_changed = 0;
++
++        // Generate defaut fragment shader if needed
++        if (program_map_should_generate_fs[program] == ShouldGenerateFSState::Maybe) {
++            GenerateDefaultFSSource();
++            GLuint& default_fs = DefaultFSMap[CurrentDefaultFSSourceVersion];
++            if (!default_fs) {
++                default_fs = GLES.glCreateShader(GL_FRAGMENT_SHADER);
++                if (default_fs) mg_forget_shader_defaults(default_fs);
++                const char* src = DefaultFSSource.c_str();
++                GLES.glShaderSource(default_fs, 1, &src, nullptr);
++
++                GLES.glCompileShader(default_fs);
++
++                GLint success = 0;
++                GLES.glGetShaderiv(default_fs, GL_COMPILE_STATUS, &success);
++                if (!success) {
++                    GLint logLength = 0;
++                    GLES.glGetShaderiv(default_fs, GL_INFO_LOG_LENGTH, &logLength);
++                    std::vector<char> log(logLength);
++                    GLES.glGetShaderInfoLog(default_fs, logLength, nullptr, log.data());
++                    LOG_E("Default fragment shader compile error for program %u :\n%s\n", program, log.data());
++                    GLES.glDeleteShader(default_fs);
++                    default_fs = 0;
++                }
++            }
++
++            if (default_fs) {
++                LOG_D("Try to attach missing default FS for program %u...", program);
++                GLES.glAttachShader(program, default_fs);
++            }
++        }
++
++        const auto defaults = mg_prepare_program_defaults(program);
++        if (!defaults.supported) {
++            mg_set_shader_source_error(GL_INVALID_OPERATION);
++            return;
++        }
++        GLES.glLinkProgram(program);
++        mg_apply_program_defaults(program, defaults);
++    } catch (const std::bad_alloc&) {
++        mg_set_shader_source_error(GL_OUT_OF_MEMORY);
++    } catch (const std::length_error&) {
++        mg_set_shader_source_error(GL_OUT_OF_MEMORY);
++    } catch (...) {
++        mg_set_shader_source_error(GL_INVALID_OPERATION);
++    }
+ }
+ 
+ void glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
+@@ -324,6 +198,11 @@
+     if (program != gl_state->current_program) {
+         gl_state->current_program = program;
+         GLES.glUseProgram(program);
++        try {
++            mg_collect_shader_defaults();
++        } catch (...) {
++            mg_set_shader_source_error(GL_OUT_OF_MEMORY);
++        }
+         CHECK_GL_ERROR
+     }
+ }
+--- a/MobileGlues-cpp/gl/shader.cpp
++++ b/MobileGlues-cpp/gl/shader.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-06: exact source submission and uniform-default lifecycle.
+ // MobileGlues - gl/shader.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -6,7 +7,12 @@
+ // End of Source File Header
+ 
+ #include <cctype>
++#include <algorithm>
++#include <limits>
++#include <new>
++#include <stdexcept>
+ #include "shader.h"
++#include "shader_defaults.h"
+ 
+ #include <GL/gl.h>
+ #include "log.h"
+@@ -16,6 +22,7 @@
+ #include "glsl/glsl_for_es.h"
+ #include "../config/settings.h"
+ #include "FSR1/FSR1.h"
++#include "../egl/context.h"
+ 
+ #define DEBUG 0
+ 
+@@ -23,10 +30,35 @@
+ 
+ UnorderedMap<GLuint, bool> shader_map_is_sampler_buffer_emulated;
+ 
+-// The uniform initialisers stripped from each translated shader, applied by
+-// glLinkProgram once a program using the shader links. A shader without any has
+-// no entry.
+-UnorderedMap<GLuint, std::vector<uniform_default_t>> shader_uniform_defaults;
++namespace {
++thread_local GLenum fallback_shader_source_error = GL_NO_ERROR;
++
++GLenum& shader_source_error_slot() {
++    return g_current_ctx ? g_current_ctx->shader_source_error : fallback_shader_source_error;
++}
++
++void set_shader_source_error(GLenum error) {
++    GLenum& slot = shader_source_error_slot();
++    if (slot == GL_NO_ERROR) slot = error;
++}
++
++bool valid_shader_source_object(GLuint shader) {
++    if (GLES.glIsShader(shader)) return true;
++    set_shader_source_error(GLES.glIsProgram(shader) ? GL_INVALID_OPERATION : GL_INVALID_VALUE);
++    return false;
++}
++} // namespace
++
++void mg_set_shader_source_error(GLenum error) noexcept {
++    set_shader_source_error(error);
++}
++
++GLenum mg_take_shader_source_error() {
++    GLenum& slot = shader_source_error_slot();
++    const GLenum error = slot;
++    slot = GL_NO_ERROR;
++    return error;
++}
+ 
+ bool can_run_essl3(unsigned int esversion, const char* glsl) {
+     if (strncmp(glsl, "#version 100", 12) == 0) {
+@@ -51,72 +83,121 @@
+     return es3_ability;
+ }
+ 
+-bool check_if_sampler_buffer_used(std::string str) {
++bool check_if_sampler_buffer_used(const std::string& str) {
+     return str.find("samplerBuffer") != std::string::npos;
+ }
+ 
+ void glShaderSource(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
+     LOG()
+-    shaderInfo.id = 0;
+-    shaderInfo.converted = "";
+-    shaderInfo.frag_data_changed_converted.clear();
+-    shaderInfo.frag_data_changed = 0;
+-    shader_uniform_defaults.erase(shader);
+-    size_t l = 0;
+-    for (int i = 0; i < count; i++)
+-        l += (length && length[i] >= 0) ? length[i] : strlen(string[i]);
+-    std::string glsl_src, essl_src;
+-    glsl_src.reserve(l + 1);
+-    if (length) {
+-        for (int i = 0; i < count; i++) {
+-            if (length[i] >= 0)
+-                glsl_src += std::string_view(string[i], length[i]);
+-            else
+-                glsl_src += string[i];
+-        }
+-    } else {
+-        for (int i = 0; i < count; i++) {
+-            glsl_src += string[i];
+-        }
+-    }
+-
+-    bool is_sampler_buffer_emulated = hardware->emulate_texture_buffer && check_if_sampler_buffer_used(glsl_src);
+-
+-    if (is_direct_shader(glsl_src.c_str())) {
+-        LOG_D("[INFO] [Shader] Direct shader source: ")
+-        LOG_D("%s", glsl_src.c_str())
+-        essl_src = glsl_src;
+-    } else {
+-        int glsl_version = getGLSLVersion(glsl_src.c_str());
+-        LOG_D("[INFO] [Shader] Shader source: ")
+-        LOG_D("%s", glsl_src.c_str())
+-        GLint shaderType;
+-        GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shaderType);
+-        int return_code = 0;
+-        std::vector<uniform_default_t> uniform_defaults;
+-        essl_src = GLSLtoGLSLES(glsl_src.c_str(), shaderType, hardware->es_version, glsl_version, return_code,
+-                                &uniform_defaults);
+-
+-        if (essl_src.empty()) {
+-            LOG_E("Failed to convert shader %d.", shader)
++    // Reject invalid calls before reading caller memory or changing any cached
++    // source. glIsShader/glIsProgram do not consume an earlier driver error.
++    if (count < 0) {
++        set_shader_source_error(GL_INVALID_VALUE);
++        return;
++    }
++    if (!valid_shader_source_object(shader)) return;
++    // Positive count with a null array has no defined GL memory-access behavior;
++    // reject it defensively instead of crashing inside the translator.
++    if (count > 0 && !string) {
++        set_shader_source_error(GL_INVALID_VALUE);
++        return;
++    }
++
++    try {
++        std::string glsl_src, essl_src;
++        mg_uniform_defaults defaults;
++        // Include room for the terminator in GL_SHADER_SOURCE_LENGTH's GLint.
++        // Checked subtraction prevents size_t wrap as well as GLint truncation.
++        const size_t maximum = std::min(glsl_src.max_size(),
++            static_cast<size_t>(std::numeric_limits<GLint>::max()) - 1);
++        size_t total = 0;
++        for (GLsizei i = 0; i < count; ++i) {
++            if (length && length[i] == 0) continue; // do not even touch string[i]
++            if (!string[i]) {
++                set_shader_source_error(GL_INVALID_VALUE);
++                return;
++            }
++            const size_t part = length && length[i] >= 0
++                ? static_cast<size_t>(length[i]) : strlen(string[i]);
++            if (part > maximum - total) {
++                set_shader_source_error(GL_OUT_OF_MEMORY);
++                return;
++            }
++            total += part;
++        }
++        glsl_src.reserve(total);
++        for (GLsizei i = 0; i < count; ++i) {
++            if (length && length[i] == 0) continue;
++            const size_t part = length && length[i] >= 0
++                ? static_cast<size_t>(length[i]) : strlen(string[i]);
++            glsl_src.append(string[i], part); // no separators or implicit newlines
++        }
++
++        const bool sampler_buffer = hardware->emulate_texture_buffer && check_if_sampler_buffer_used(glsl_src);
++        const bool embedded_nul = glsl_src.find('\0') != std::string::npos;
++        // Empty source is a valid replacement. Explicit lengths can include
++        // embedded NUL bytes, but this translator/cache accepts C strings; bypass
++        // it rather than silently compiling only the prefix before the NUL.
++        if (glsl_src.empty() || embedded_nul || is_direct_shader(glsl_src.c_str())) {
++            essl_src = glsl_src;
++        } else {
++            GLint shader_type = 0;
++            GLES.glGetShaderiv(shader, GL_SHADER_TYPE, &shader_type);
++            int result = -1;
++            try {
++                const int version = getGLSLVersion(glsl_src.c_str());
++                essl_src = GLSLtoGLSLES(glsl_src.c_str(), shader_type, hardware->es_version, version, result, &defaults);
++            } catch (const std::bad_alloc&) {
++                throw;
++            } catch (const std::length_error&) {
++                throw;
++            } catch (const std::exception& error) {
++                LOG_W_FORCE("Shader %u translation failed: %s", shader, error.what())
++                result = -1;
++            }
++            if (result < 0 || essl_src.empty()) {
++                // Replace the old source even when translation fails. Retain
++                // the original bytes and let the driver's compile status/log
++                // describe the new input; never silently keep the old source.
++                essl_src = glsl_src;
++                defaults.clear();
++            }
++        }
++        if (essl_src.size() > maximum) {
++            set_shader_source_error(GL_OUT_OF_MEMORY);
+             return;
+         }
+-        if (!uniform_defaults.empty()) {
+-            LOG_D("[INFO] [Shader] %zu uniform default(s) kept for shader %u", uniform_defaults.size(), shader)
+-            shader_uniform_defaults[shader] = std::move(uniform_defaults);
+-        }
+-        LOG_D("\n[INFO] [Shader] Converted Shader source: \n%s", essl_src.c_str())
+-    }
+-    if (!essl_src.empty()) {
++
++        // Reserve a bookkeeping entry before touching driver state so a host
++        // allocation failure cannot escape this C ABI after submission.
++        auto sampler = shader_map_is_sampler_buffer_emulated.end();
++        if (hardware->emulate_texture_buffer)
++            sampler = shader_map_is_sampler_buffer_emulated.emplace(shader, false).first;
++        const auto default_update = mg_prepare_shader_defaults(shader, std::move(defaults));
++        const GLchar* source = essl_src.c_str();
++        const GLint source_length = static_cast<GLint>(essl_src.size());
++        GLES.glShaderSource(shader, 1, &source, &source_length);
++        mg_commit_shader_defaults(default_update);
++
++        // All fallible preparation is complete. Commit using non-allocating
++        // operations; rejected calls above leave every previous cache intact.
+         shaderInfo.id = shader;
+-        shaderInfo.converted = essl_src;
+-        const char* s[] = {essl_src.c_str()};
+-        GLES.glShaderSource(shader, count, s, nullptr);
+-        if (hardware->emulate_texture_buffer)
+-            shader_map_is_sampler_buffer_emulated[shader] = is_sampler_buffer_emulated;
+-    } else
+-        LOG_E("Failed to convert glsl.")
+-    CHECK_GL_ERROR
++        // glLinkProgram's optional fragment-output patch uses a C string.
++        // Do not let that later path turn this exact byte string into a prefix.
++        if (essl_src.find('\0') != std::string::npos) shaderInfo.converted.clear();
++        else shaderInfo.converted.swap(essl_src);
++        shaderInfo.frag_data_changed_converted.clear();
++        shaderInfo.frag_data_changed = 0;
++        if (sampler != shader_map_is_sampler_buffer_emulated.end()) sampler->second = sampler_buffer;
++    } catch (const std::bad_alloc&) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    } catch (const std::length_error&) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    } catch (...) {
++        set_shader_source_error(GL_INVALID_OPERATION);
++    }
++    // Do not use CHECK_GL_ERROR here: even a debug build must leave pre-existing
++    // driver errors available to the caller of glGetError.
+ }
+ 
+ void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
+@@ -140,7 +221,63 @@
+     LOG()
+     LOG_D("glCreateShader(%s)", glEnumToString(shaderType))
+     GLuint shader = GLES.glCreateShader(shaderType);
+-    if (shader != 0 && hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
+-    CHECK_GL_ERROR
++    if (shader == 0) return shader;
++    try {
++        mg_forget_shader_defaults(shader);
++        if (hardware->emulate_texture_buffer) shader_map_is_sampler_buffer_emulated[shader] = false;
++    } catch (...) {
++        GLES.glDeleteShader(shader);
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++        return 0;
++    }
+     return shader;
+-}
+\ No newline at end of file
++}
++
++#ifndef __APPLE__
++extern "C" GLAPI GLAPIENTRY void glCompileShaderARB(GLuint shader) __attribute__((alias("glCompileShader")));
++extern "C" GLAPI GLAPIENTRY void glDeleteShaderARB(GLuint shader) __attribute__((alias("glDeleteShader")));
++extern "C" GLAPI GLAPIENTRY void glDetachShaderARB(GLuint program, GLuint shader) __attribute__((alias("glDetachShader")));
++extern "C" GLAPI GLAPIENTRY void glDeleteProgramARB(GLuint program) __attribute__((alias("glDeleteProgram")));
++#endif
++
++void glCompileShader(GLuint shader) {
++    if (!valid_shader_source_object(shader)) return;
++    try {
++        const auto update = mg_snapshot_shader_defaults(shader);
++        GLES.glCompileShader(shader);
++        GLint compiled = GL_FALSE;
++        GLES.glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
++        if (compiled == GL_TRUE) mg_commit_compiled_defaults(update);
++    } catch (const std::bad_alloc&) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    } catch (...) {
++        set_shader_source_error(GL_INVALID_OPERATION);
++    }
++}
++
++void glDeleteShader(GLuint shader) {
++    GLES.glDeleteShader(shader);
++    try {
++        mg_delete_shader_defaults(shader);
++    } catch (...) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    }
++}
++
++void glDetachShader(GLuint program, GLuint shader) {
++    GLES.glDetachShader(program, shader);
++    try {
++        mg_collect_shader_defaults();
++    } catch (...) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    }
++}
++
++void glDeleteProgram(GLuint program) {
++    GLES.glDeleteProgram(program);
++    try {
++        mg_collect_shader_defaults();
++    } catch (...) {
++        set_shader_source_error(GL_OUT_OF_MEMORY);
++    }
++}
+--- a/MobileGlues-cpp/gl/shader.h
++++ b/MobileGlues-cpp/gl/shader.h
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR from 2026-10-31 to 2026-11-06: shader-source API handling and lifecycle exports.
+ // MobileGlues - gl/shader.h
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -23,6 +24,11 @@
+ 
+ extern struct shader_t shaderInfo;
+ 
++// Separate from MobileGlues' legacy suppressed backend errors: rejected shader
++// submissions must be observable without changing unrelated renderer behavior.
++GLenum mg_take_shader_source_error();
++void mg_set_shader_source_error(GLenum error) noexcept;
++
+ #ifdef __cplusplus
+ extern "C"
+ {
+@@ -32,6 +38,10 @@
+                                          const GLint* length);
+ 
+     GLAPI GLAPIENTRY void glGetShaderiv(GLuint shader, GLenum pname, GLint* params);
++    GLAPI GLAPIENTRY void glCompileShader(GLuint shader);
++    GLAPI GLAPIENTRY void glDeleteShader(GLuint shader);
++    GLAPI GLAPIENTRY void glDetachShader(GLuint program, GLuint shader);
++    GLAPI GLAPIENTRY void glDeleteProgram(GLuint program);
+ 
+ #ifdef __cplusplus
+ }
+--- /dev/null
++++ b/MobileGlues-cpp/gl/shader_defaults.cpp
+@@ -0,0 +1,254 @@
++// Copyright (c) 2025-2026 MobileGL-Dev
++// Copyright (c) 2026 FCL Quest VR contributors
++// Licensed under the GNU Lesser General Public License v2.1:
++//   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
++// SPDX-License-Identifier: LGPL-2.1-only
++#include "shader_defaults.h"
++#include "../egl/context.h"
++#include "../gles/loader.h"
++#include <cmath>
++#include <limits>
++#include <mutex>
++#include <unordered_map>
++
++struct mg_shader_defaults_record {
++    std::shared_ptr<const mg_uniform_defaults> source, compiled;
++    bool delete_requested = false;
++};
++
++struct mg_shader_defaults_state {
++    std::mutex mutex;
++    std::unordered_map<GLuint, std::shared_ptr<mg_shader_defaults_record>> shaders;
++};
++
++namespace {
++std::mutex state_mutex;
++
++std::shared_ptr<mg_shader_defaults_state> current_state(bool create = false) {
++    if (!g_current_ctx || !g_current_ctx->share_group) return {};
++    std::lock_guard<std::mutex> lock(state_mutex);
++    auto& state = g_current_ctx->share_group->shader_defaults;
++    if (!state && create) state = std::make_shared<mg_shader_defaults_state>();
++    return state;
++}
++
++bool upload_supported(const mg_uniform_upload& d) {
++    if (!hardware || hardware->es_version < 310) return false;
++    if ((d.base == uniform_base_t::Float) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: return GLES.glProgramUniform1fv != nullptr;
++        case 2: return GLES.glProgramUniform2fv != nullptr;
++        case 3: return GLES.glProgramUniform3fv != nullptr;
++        case 4: return GLES.glProgramUniform4fv != nullptr;
++        default: return false;
++        }
++    }
++    if ((d.base == uniform_base_t::Int || d.base == uniform_base_t::Bool) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: return GLES.glProgramUniform1iv != nullptr;
++        case 2: return GLES.glProgramUniform2iv != nullptr;
++        case 3: return GLES.glProgramUniform3iv != nullptr;
++        case 4: return GLES.glProgramUniform4iv != nullptr;
++        default: return false;
++        }
++    }
++    if ((d.base == uniform_base_t::Uint) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: return GLES.glProgramUniform1uiv != nullptr;
++        case 2: return GLES.glProgramUniform2uiv != nullptr;
++        case 3: return GLES.glProgramUniform3uiv != nullptr;
++        case 4: return GLES.glProgramUniform4uiv != nullptr;
++        default: return false;
++        }
++    }
++    if (d.base != uniform_base_t::Float) return false;
++    switch (d.columns * 10 + d.rows) {
++    case 22: return GLES.glProgramUniformMatrix2fv != nullptr;
++    case 33: return GLES.glProgramUniformMatrix3fv != nullptr;
++    case 44: return GLES.glProgramUniformMatrix4fv != nullptr;
++    case 23: return GLES.glProgramUniformMatrix2x3fv != nullptr;
++    case 32: return GLES.glProgramUniformMatrix3x2fv != nullptr;
++    case 24: return GLES.glProgramUniformMatrix2x4fv != nullptr;
++    case 42: return GLES.glProgramUniformMatrix4x2fv != nullptr;
++    case 34: return GLES.glProgramUniformMatrix3x4fv != nullptr;
++    case 43: return GLES.glProgramUniformMatrix4x3fv != nullptr;
++    default: return false;
++    }
++}
++
++void upload(GLuint program, GLint location, const mg_uniform_upload& d) {
++    if ((d.base == uniform_base_t::Float) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: GLES.glProgramUniform1fv(program, location, d.count, d.floats.data()); return;
++        case 2: GLES.glProgramUniform2fv(program, location, d.count, d.floats.data()); return;
++        case 3: GLES.glProgramUniform3fv(program, location, d.count, d.floats.data()); return;
++        case 4: GLES.glProgramUniform4fv(program, location, d.count, d.floats.data()); return;
++        default: return;
++        }
++    }
++    if ((d.base == uniform_base_t::Int || d.base == uniform_base_t::Bool) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: GLES.glProgramUniform1iv(program, location, d.count, d.integers.data()); return;
++        case 2: GLES.glProgramUniform2iv(program, location, d.count, d.integers.data()); return;
++        case 3: GLES.glProgramUniform3iv(program, location, d.count, d.integers.data()); return;
++        case 4: GLES.glProgramUniform4iv(program, location, d.count, d.integers.data()); return;
++        default: return;
++        }
++    }
++    if ((d.base == uniform_base_t::Uint) && d.columns == 1) {
++        switch (d.rows) {
++        case 1: GLES.glProgramUniform1uiv(program, location, d.count, d.unsigned_integers.data()); return;
++        case 2: GLES.glProgramUniform2uiv(program, location, d.count, d.unsigned_integers.data()); return;
++        case 3: GLES.glProgramUniform3uiv(program, location, d.count, d.unsigned_integers.data()); return;
++        case 4: GLES.glProgramUniform4uiv(program, location, d.count, d.unsigned_integers.data()); return;
++        default: return;
++        }
++    }
++    if (d.base != uniform_base_t::Float) return;
++    switch (d.columns * 10 + d.rows) {
++    case 22: GLES.glProgramUniformMatrix2fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 33: GLES.glProgramUniformMatrix3fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 44: GLES.glProgramUniformMatrix4fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 23: GLES.glProgramUniformMatrix2x3fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 32: GLES.glProgramUniformMatrix3x2fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 24: GLES.glProgramUniformMatrix2x4fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 42: GLES.glProgramUniformMatrix4x2fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 34: GLES.glProgramUniformMatrix3x4fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    case 43: GLES.glProgramUniformMatrix4x3fv(program, location, d.count, GL_FALSE, d.floats.data()); return;
++    default: return;
++    }
++}
++
++bool valid_default(const uniform_default_t& d) {
++    if (d.name.empty() || d.rows < 1 || d.rows > 4 || d.columns < 1 || d.columns > 4 || d.count < 1)
++        return false;
++    if (d.columns > 1 && (d.base != uniform_base_t::Float || d.rows < 2)) return false;
++    const size_t width = static_cast<size_t>(d.rows) * d.columns;
++    if (static_cast<size_t>(d.count) > std::numeric_limits<size_t>::max() / width ||
++        d.values.size() != width * static_cast<size_t>(d.count)) return false;
++    for (const double value : d.values) {
++        if (!std::isfinite(value)) return false;
++        if (d.base == uniform_base_t::Float) continue;
++        if (std::trunc(value) != value) return false;
++        if (d.base == uniform_base_t::Uint) {
++            if (value < 0 || value > std::numeric_limits<GLuint>::max()) return false;
++        } else if (value < std::numeric_limits<GLint>::min() || value > std::numeric_limits<GLint>::max()) return false;
++    }
++    return true;
++}
++}
++
++mg_shader_defaults_update mg_prepare_shader_defaults(GLuint shader, mg_uniform_defaults values) {
++    mg_shader_defaults_update update;
++    update.state = current_state(true);
++    if (!update.state) return update;
++    if (!values.empty()) update.values = std::make_shared<const mg_uniform_defaults>(std::move(values));
++    std::lock_guard<std::mutex> lock(update.state->mutex);
++    auto it = update.state->shaders.find(shader);
++    if (it == update.state->shaders.end())
++        it = update.state->shaders.emplace(shader, std::make_shared<mg_shader_defaults_record>()).first;
++    update.record = it->second;
++    return update;
++}
++
++void mg_commit_shader_defaults(const mg_shader_defaults_update& update) {
++    if (!update.record) return;
++    std::lock_guard<std::mutex> lock(update.state->mutex);
++    update.record->source = update.values;
++}
++
++mg_shader_defaults_update mg_snapshot_shader_defaults(GLuint shader) {
++    mg_shader_defaults_update update;
++    update.state = current_state();
++    if (!update.state) return update;
++    std::lock_guard<std::mutex> lock(update.state->mutex);
++    const auto it = update.state->shaders.find(shader);
++    if (it != update.state->shaders.end()) {
++        update.record = it->second;
++        update.values = update.record->source;
++    }
++    return update;
++}
++
++void mg_commit_compiled_defaults(const mg_shader_defaults_update& update) {
++    if (!update.record) return;
++    std::lock_guard<std::mutex> lock(update.state->mutex);
++    update.record->compiled = update.values;
++}
++
++void mg_forget_shader_defaults(GLuint shader) {
++    const auto state = current_state();
++    if (!state) return;
++    std::lock_guard<std::mutex> lock(state->mutex);
++    state->shaders.erase(shader);
++}
++
++void mg_delete_shader_defaults(GLuint shader) {
++    const auto state = current_state();
++    if (!state) return;
++    std::lock_guard<std::mutex> lock(state->mutex);
++    const auto it = state->shaders.find(shader);
++    if (it == state->shaders.end()) return;
++    if (GLES.glIsShader(shader)) it->second->delete_requested = true;
++    else state->shaders.erase(it);
++}
++
++void mg_collect_shader_defaults() {
++    const auto state = current_state();
++    if (!state) return;
++    std::lock_guard<std::mutex> lock(state->mutex);
++    for (auto it = state->shaders.begin(); it != state->shaders.end();) {
++        if (it->second->delete_requested && !GLES.glIsShader(it->first)) it = state->shaders.erase(it);
++        else ++it;
++    }
++}
++
++mg_program_defaults mg_prepare_program_defaults(GLuint program) {
++    mg_program_defaults prepared;
++    const auto state = current_state();
++    if (!state || !GLES.glIsProgram(program)) return prepared;
++    GLint count = 0;
++    GLES.glGetProgramiv(program, GL_ATTACHED_SHADERS, &count);
++    if (count <= 0) return prepared;
++    std::vector<GLuint> shaders(static_cast<size_t>(count));
++    GLsizei attached = 0;
++    GLES.glGetAttachedShaders(program, count, &attached, shaders.data());
++    std::vector<std::shared_ptr<const mg_uniform_defaults>> snapshots;
++    {
++        std::lock_guard<std::mutex> lock(state->mutex);
++        for (GLsizei i = 0; i < attached && i < count; ++i) {
++            const auto it = state->shaders.find(shaders[i]);
++            if (it != state->shaders.end() && it->second->compiled) snapshots.push_back(it->second->compiled);
++        }
++    }
++    for (const auto& snapshot : snapshots) {
++        for (const auto& d : *snapshot) {
++            if (!valid_default(d)) continue;
++            mg_uniform_upload item;
++            item.name = d.name;
++            item.array_name = d.name + "[0]";
++            item.base = d.base;
++            item.rows = d.rows;
++            item.columns = d.columns;
++            item.count = d.count;
++            if (d.base == uniform_base_t::Float) item.floats.assign(d.values.begin(), d.values.end());
++            else if (d.base == uniform_base_t::Uint) item.unsigned_integers.assign(d.values.begin(), d.values.end());
++            else item.integers.assign(d.values.begin(), d.values.end());
++            if (!upload_supported(item)) prepared.supported = false;
++            prepared.uploads.push_back(std::move(item));
++        }
++    }
++    return prepared;
++}
++
++void mg_apply_program_defaults(GLuint program, const mg_program_defaults& defaults) {
++    if (defaults.uploads.empty() || !defaults.supported || !GLES.glIsProgram(program)) return;
++    GLint linked = GL_FALSE;
++    GLES.glGetProgramiv(program, GL_LINK_STATUS, &linked);
++    if (linked != GL_TRUE) return;
++    for (const auto& item : defaults.uploads) {
++        GLint location = GLES.glGetUniformLocation(program, item.name.c_str());
++        if (location < 0) location = GLES.glGetUniformLocation(program, item.array_name.c_str());
++        if (location >= 0) upload(program, location, item);
++    }
++}
+--- /dev/null
++++ b/MobileGlues-cpp/gl/shader_defaults.h
+@@ -0,0 +1,50 @@
++// Copyright (c) 2025-2026 MobileGL-Dev
++// Copyright (c) 2026 FCL Quest VR contributors
++// Licensed under the GNU Lesser General Public License v2.1:
++//   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
++// SPDX-License-Identifier: LGPL-2.1-only
++#ifndef MOBILEGLUES_SHADER_DEFAULTS_H
++#define MOBILEGLUES_SHADER_DEFAULTS_H
++
++#include <GL/gl.h>
++#include <memory>
++#include <string>
++#include <vector>
++#include "glsl/uniform_defaults.h"
++
++struct mg_shader_defaults_state;
++struct mg_shader_defaults_record;
++using mg_uniform_defaults = std::vector<uniform_default_t>;
++
++struct mg_shader_defaults_update {
++    std::shared_ptr<mg_shader_defaults_state> state;
++    std::shared_ptr<mg_shader_defaults_record> record;
++    std::shared_ptr<const mg_uniform_defaults> values;
++};
++
++struct mg_uniform_upload {
++    std::string name, array_name;
++    uniform_base_t base;
++    int rows, columns;
++    GLsizei count;
++    std::vector<GLfloat> floats;
++    std::vector<GLint> integers;
++    std::vector<GLuint> unsigned_integers;
++};
++
++struct mg_program_defaults {
++    bool supported = true;
++    std::vector<mg_uniform_upload> uploads;
++};
++
++mg_shader_defaults_update mg_prepare_shader_defaults(GLuint shader, mg_uniform_defaults values);
++void mg_commit_shader_defaults(const mg_shader_defaults_update& update);
++mg_shader_defaults_update mg_snapshot_shader_defaults(GLuint shader);
++void mg_commit_compiled_defaults(const mg_shader_defaults_update& update);
++void mg_forget_shader_defaults(GLuint shader);
++void mg_delete_shader_defaults(GLuint shader);
++void mg_collect_shader_defaults();
++mg_program_defaults mg_prepare_program_defaults(GLuint program);
++void mg_apply_program_defaults(GLuint program, const mg_program_defaults& defaults);
++
++#endif
+--- a/MobileGlues-cpp/glx/lookup.cpp
++++ b/MobileGlues-cpp/glx/lookup.cpp
+@@ -4,6 +4,7 @@
+ //   https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+ // SPDX-License-Identifier: LGPL-2.1-only
+ // End of Source File Header
++// Modified for FCL Quest VR on 2026-11-04: keep procedure lookup within this renderer.
+ 
+ #include "lookup.h"
+ 
+@@ -18,6 +19,25 @@
+ #include <dlfcn.h>
+ 
+ #define DEBUG 0
++
++#ifndef __APPLE__
++static void* renderer_library() {
++    static char anchor;
++    static void* const handle = []() -> void* {
++        Dl_info info{};
++        if (dladdr(&anchor, &info) == 0 || info.dli_fname == nullptr) {
++            LOG_W_FORCE("Unable to locate MobileGlues for procedure lookup")
++            return nullptr;
++        }
++        void* library = dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
++        if (library == nullptr) {
++            LOG_W_FORCE("Unable to open MobileGlues for procedure lookup: %s", dlerror())
++        }
++        return library;
++    }();
++    return handle;
++}
++#endif
+ 
+ // The application can ask for a multi-draw entry point by name and call the
+ // result directly, bypassing the dispatcher in gl/multidraw.cpp. Hand back the
+@@ -49,14 +69,15 @@
+ 
+ void* glXGetProcAddress(const char* name) {
+     LOG()
++    if (name == nullptr || name[0] == '\0') return nullptr;
+     std::string real_func_name = handle_multidraw_func_name(std::string(name));
+ #ifdef __APPLE__
+     return dlsym((void*)(~(uintptr_t)0), real_func_name.c_str());
+ #else
+ 
+-    void* proc = nullptr;
+-
+-    proc = dlsym(RTLD_DEFAULT, real_func_name.c_str());
++    void* library = renderer_library();
++    if (library == nullptr) return nullptr;
++    void* proc = dlsym(library, real_func_name.c_str());
+ 
+     if (!proc) {
+         LOG_W("Failed to get OpenGL function: %s", real_func_name.c_str())
+@@ -69,4 +90,4 @@
+ 
+ void* glXGetProcAddressARB(const char* name) {
+     return glXGetProcAddress(name);
+-}
+\ No newline at end of file
++}

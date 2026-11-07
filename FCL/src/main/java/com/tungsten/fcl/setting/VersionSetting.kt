@@ -210,6 +210,13 @@ class VersionSetting : Cloneable {
             changed()
         }
 
+    var vrStereoSyncEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            changed()
+        }
+
     var nonVrRenderer: String = Renderer.ID_NGGL4ES
         set(value) {
             if (field == value) return
@@ -293,6 +300,7 @@ class VersionSetting : Cloneable {
             it.isVrEnabled = isVrEnabled
             it.vrRenderScalePercent = vrRenderScalePercent
             it.vrFsaaEnabled = vrFsaaEnabled
+            it.vrStereoSyncEnabled = vrStereoSyncEnabled
             it.nonVrRenderer = nonVrRenderer
             it.driver = driver
             it.isNotCheckMod = isNotCheckMod
@@ -329,6 +337,7 @@ class VersionSetting : Cloneable {
                 addProperty("vrEnabled", src.isVrEnabled)
                 addProperty("vrRenderScalePercent", src.vrRenderScalePercent)
                 addProperty("vrFsaaEnabled", src.vrFsaaEnabled)
+                addProperty("vrStereoSyncEnabled", src.vrStereoSyncEnabled)
                 addProperty("nonVrRenderer", src.nonVrRenderer)
                 addProperty("driver", src.driver)
                 addProperty("isolateGameDir", src.isIsolateGameDir)
@@ -372,6 +381,8 @@ class VersionSetting : Cloneable {
                 vs.isVrEnabled = json["vrEnabled"]?.asBoolean ?: false
                 vs.vrRenderScalePercent = QuestVrGraphicsSettings.parseRenderScalePercent(json["vrRenderScalePercent"])
                 vs.vrFsaaEnabled = QuestVrGraphicsSettings.parseFsaaEnabled(json["vrFsaaEnabled"])
+                vs.vrStereoSyncEnabled = json["vrStereoSyncEnabled"]
+                    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean ?: true
                 vs.nonVrRenderer = json["nonVrRenderer"]?.asString ?: Renderer.ID_NGGL4ES
                 vs.driver = json["driver"]?.asString ?: "Turnip"
                 vs.isIsolateGameDir = json["isolateGameDir"]?.asBoolean ?: false

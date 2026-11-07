@@ -5,7 +5,11 @@
     <string name="settings_vr_render_scale_range">请输入 10–900 的整数（百分比）</string>
     <string name="settings_vr_fsaa">FSAA 抗锯齿</string>
     <string name="settings_vr_fsaa_desc">启用 Vivecraft 的 Lanczos 缩放滤波，可配合高于 100% 的渲染比例使用。会增加渲染开销，修改后下次启动游戏生效。</string>
+    <string name="settings_vr_stereo_sync">双眼同步</string>
+    <string name="settings_vr_stereo_sync_desc">在提交 VR 画面前等待双眼渲染完成，改善高负载光影下的画面抖动。可能降低游戏帧率，重启游戏后生效。</string>
     <string name="settings_vr_graphics_loading">读取中…</string>
     <string name="settings_quest_vr_transition_animation">Quest VR 切换过渡动画</string>
     <string name="settings_quest_vr_transition_animation_desc">切换平面与 VR 模式时淡入淡出。默认开启；修改后下次启动游戏生效。</string>
+    <string name="settings_high_game_thread_priority">游戏线程高优先级</string>
+    <string name="settings_high_game_thread_priority_desc">默认开启。关闭后使用普通 CPU 优先级。下次启动游戏时生效。</string>
 </resources>

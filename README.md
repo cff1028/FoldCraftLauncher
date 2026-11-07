@@ -2,9 +2,9 @@
 
 基于 [FCL](https://github.com/FCL-Team/FoldCraftLauncher) 的 Quest 3 / ARM64 分支，包名 `com.questfcl.launcher`，可与原版共存。
 
-- 每个实例独立开启 Quest VR，支持 VR 渲染比例、FSAA 和游戏内 VR / 平面切换。
-- 集成 MobileGlues 2.0.0 VR 适配，提供匹配版本的 Vivecraft 下载入口；公开版不含 LTW。
-- [下载预览版](https://github.com/cff1028/FoldCraftLauncher/releases) · [构建说明](BUILDING.txt) · [依赖许可与源码](third-party/quest-vr/README.md)
+- 每个实例独立开启 Quest VR，支持渲染比例、FSAA、双眼同步和游戏内 VR / 平面切换。双眼同步默认开启，用于改善重载光影抖动。
+- 集成 MobileGlues 2.0.1 Dev1 与 26.3 兼容修复；Vivecraft 下载可选择 QuestCraft 或 cff1028 来源。公开版不含 LTW。
+- [下载](https://github.com/cff1028/FoldCraftLauncher/releases) · [构建说明](BUILDING.txt) · [依赖许可与源码](third-party/quest-vr/README.md)
 
 本分支由 cff1028 维护；以下为上游项目介绍与致谢。
 

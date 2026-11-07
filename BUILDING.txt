@@ -1,7 +1,18 @@
 FCL Quest VR — build and relink
 
 Source: https://github.com/cff1028/FoldCraftLauncher
-Release: v0.1.0-vr-preview10; package com.questfcl.launcher; VersionCode 10.
+Local release: 0.1.0-vr.5; package com.questfcl.launcher; VersionCode 20.
+
+Built-in MobileGlues runs directly for Minecraft 1.17 / 21w10a and later.
+Older and unknown versions retain the fixed-function compatibility layer.
+External renderer plugins retain their user-selected compatibility setting.
+SDL EGL lookup preserves missing symbols and uses the renderer's actual EGL library.
+Vivecraft downloads offer separate QuestCraft and cff1028 sources.
+
+VR stereo synchronization is enabled by default for each VR instance.
+The launcher applies FCL_VR_STEREO_SYNC at the next game launch. The OpenXR
+adapter waits for preceding GPU commands before releasing each eye image.
+Use the matching unmodified QuestCraft Vivecraft mod for the Minecraft version.
 
 Use JDK 17, Android SDK 35, NDK 27.0.12077973, CMake 3.22.1 and the Gradle wrapper.
 Set ANDROID_HOME or sdk.dir in local.properties, then:
@@ -18,11 +29,12 @@ An APK signed with a different key requires uninstalling the prior package
 (back up game data first), or changing applicationId to install it separately.
 CI build artifacts use a development key; releases use the existing Quest key.
 
-MobileGlues: the release's MobileGlues-2.0.0-quest-source.zip includes the patched
+MobileGlues: MobileGlues-2.0.1-Dev1-quest-source.zip includes the patched
 source, dependencies and rebuild scripts. Follow mobileglues-fix/README-source.txt.
 Replace FCL/src/main/jniLibs/arm64-v8a/libmobileglues.so with your rebuilt library.
-The four source-file modification notices are comment-only additions to the
-sources used to build the bundled library; renderer code is unchanged.
+The Quest compatibility patch preserves shader-source and procedure-lookup fixes,
+and tracks uniform defaults with the compiled shader in its share group.
+provenance.json records the input revisions, changed files and binary hash.
 
 SimpleFPEWrapper: the release's SimpleFPEWrapper-ca8c6af26ca2-source.zip includes
 the exact revision identified by the bundled library's build stamp, dependencies

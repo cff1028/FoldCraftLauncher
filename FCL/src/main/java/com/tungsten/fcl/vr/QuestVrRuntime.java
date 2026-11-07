@@ -90,7 +90,6 @@ public final class QuestVrRuntime {
         replaceProperty(command, "glfwstub.initEgl", "false");
         replaceProperty(command, "fcl.quest.vr", "true");
         replaceProperty(command, "os.version", "Android-" + Build.VERSION.RELEASE);
-        replaceProperty(command, "org.lwjgl.util.DebugLoader", "true");
     }
 
     private static void replaceProperty(CommandBuilder command, String key, String value) {
@@ -100,6 +99,7 @@ public final class QuestVrRuntime {
     }
 
     public static void applyEnvironment(FCLConfig config, Map<String, String> environment) {
+        environment.put("FCL_VR_STEREO_SYNC", config.isVrEnabled() && config.getVrStereoSyncEnabled() ? "1" : "0");
         if (!config.isVrEnabled()) {
             environment.remove("FCL_VR");
             return;
@@ -121,7 +121,6 @@ public final class QuestVrRuntime {
         environment.put("LIBGL_ES", "3");
         environment.put("LIBGL_GLES", "libGLESv3.so");
         environment.put("FORCE_VSYNC", "false");
-        environment.put("FCL_VR_NATIVE_DIR", nativeDirectory);
         environment.put("MG_DIR_PATH", new File(config.getContext().getFilesDir(), "quest-vr/mobileglues").getAbsolutePath());
         environment.remove("VULKAN_DRIVER_SYSTEM");
         environment.remove("VKSHIM_ENABLE");

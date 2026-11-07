@@ -8,6 +8,7 @@
 #include "interop.h"
 #include "presentation.h"
 #include "openxr_fade.h"
+#include "stereo_sync.h"
 #include <android/log.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -19,6 +20,8 @@ static PFN_xrGetInstanceProcAddr real_get_proc;
 static PFN_xrCreateInstance real_create_instance;
 static PFN_xrCreateSession real_create_session;
 static PFN_xrDestroySession real_destroy_session;
+static PFN_xrBeginSession real_begin_session;
+static PFN_xrEndSession real_end_session;
 static PFN_xrEndFrame real_end_frame;
 static PFN_xrDestroyInstance real_destroy_instance;
 static PFN_xrCreateSwapchain real_create_swapchain;
@@ -37,6 +40,7 @@ typedef struct fade_session_info {
     XrSession session;
     XrInstance instance;
     quest_vr_fade_state state;
+    bool fade_enabled;
     struct fade_session_info *next;
 } fade_session_info;
 static fade_instance_info *fade_instances;
@@ -44,6 +48,8 @@ static fade_session_info *fade_sessions;
 
 typedef struct swapchain_info {
     XrSwapchain handle;
+    XrSession session;
+    XrInstance instance;
     uint32_t width, height, array_size;
     struct swapchain_info *next;
 } swapchain_info;
@@ -152,9 +158,25 @@ static void forget_fade_session(XrSession session) {
     pthread_mutex_unlock(&fade_mutex);
 }
 
+static void forget_session_chains(XrInstance instance, XrSession session) {
+    pthread_mutex_lock(&chain_mutex);
+    swapchain_info **slot = &chains;
+    while (*slot) {
+        swapchain_info *entry = *slot;
+        if ((instance && entry->instance == instance) || (session && entry->session == session)) {
+            *slot = entry->next;
+            quest_vr_forget_images((uint64_t) (uintptr_t) entry->handle);
+            free(entry);
+        } else slot = &entry->next;
+    }
+    pthread_mutex_unlock(&chain_mutex);
+}
+
 static XrResult XRAPI_PTR adapted_destroy_instance(XrInstance instance) {
     XrResult result = real_destroy_instance(instance);
     if (XR_SUCCEEDED(result)) {
+        quest_vr_stereo_forget(instance, XR_NULL_HANDLE);
+        forget_session_chains(instance, XR_NULL_HANDLE);
         pthread_mutex_lock(&fade_mutex);
         fade_instance_info **instance_slot = &fade_instances;
         while (*instance_slot) {
@@ -177,10 +199,11 @@ static XrResult XRAPI_PTR adapted_destroy_instance(XrInstance instance) {
 
 static XrResult XRAPI_PTR adapted_create_session(XrInstance instance, const XrSessionCreateInfo *info,
                                                 XrSession *session) {
+    const XrGraphicsBindingOpenGLESAndroidKHR *binding = NULL;
     const XrBaseInStructure *next = info ? info->next : NULL;
     while (next) {
         if (next->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR) {
-            const XrGraphicsBindingOpenGLESAndroidKHR *binding = (const void *) next;
+            binding = (const void *) next;
             if (binding->context == EGL_NO_CONTEXT || binding->display == EGL_NO_DISPLAY ||
                 eglGetCurrentContext() != binding->context || eglGetCurrentDisplay() != binding->display) {
                 __android_log_print(ANDROID_LOG_ERROR, "FCL-QuestVR",
@@ -197,32 +220,36 @@ static XrResult XRAPI_PTR adapted_create_session(XrInstance instance, const XrSe
         bool enabled = false;
         for (fade_instance_info *entry = fade_instances; entry; entry = entry->next)
             if (entry->instance == instance) { enabled = true; break; }
-        if (enabled) {
-            fade_session_info *entry = calloc(1, sizeof(*entry));
-            if (entry) {
-                entry->instance = instance;
-                entry->session = *session;
-                entry->next = fade_sessions;
-                fade_sessions = entry;
-            }
+        fade_session_info *entry = calloc(1, sizeof(*entry));
+        if (entry) {
+            entry->instance = instance;
+            entry->session = *session;
+            entry->fade_enabled = enabled;
+            entry->next = fade_sessions;
+            fade_sessions = entry;
         }
         pthread_mutex_unlock(&fade_mutex);
+        if (binding) quest_vr_stereo_session(instance, *session, binding->display, binding->context);
     }
     return instance_result(result);
 }
 
 static XrResult XRAPI_PTR adapted_destroy_session(XrSession session) {
     XrResult result = real_destroy_session(session);
-    if (XR_SUCCEEDED(result)) forget_fade_session(session);
+    if (XR_SUCCEEDED(result)) {
+        quest_vr_stereo_forget(XR_NULL_HANDLE, session);
+        forget_session_chains(XR_NULL_HANDLE, session);
+        forget_fade_session(session);
+    }
     return result;
 }
 
-static XrResult XRAPI_PTR adapted_end_frame(XrSession session, const XrFrameEndInfo *info) {
+static XrResult fade_end_frame(XrSession session, const XrFrameEndInfo *info) {
     quest_vr_fade_state state = {0};
     bool tracked = false;
     pthread_mutex_lock(&fade_mutex);
     for (fade_session_info *entry = fade_sessions; entry; entry = entry->next)
-        if (entry->session == session) { state = entry->state; tracked = true; break; }
+        if (entry->session == session) { state = entry->state; tracked = entry->fade_enabled; break; }
     pthread_mutex_unlock(&fade_mutex);
     if (!tracked || state.complete) return real_end_frame(session, info);
     bool started = state.started;
@@ -241,6 +268,18 @@ static XrResult XRAPI_PTR adapted_end_frame(XrSession session, const XrFrameEndI
     return result;
 }
 
+static XrResult XRAPI_PTR adapted_begin_session(XrSession session, const XrSessionBeginInfo *info) {
+    XrResult result = real_begin_session(session, info);
+    if (XR_SUCCEEDED(result)) quest_vr_stereo_running(session, true);
+    return result;
+}
+
+static XrResult XRAPI_PTR adapted_end_session(XrSession session) {
+    XrResult result = real_end_session(session);
+    if (XR_SUCCEEDED(result)) quest_vr_stereo_running(session, false);
+    return result;
+}
+
 static XrResult XRAPI_PTR adapted_create_swapchain(XrSession session, const XrSwapchainCreateInfo *info,
                                                   XrSwapchain *swapchain) {
     XrResult result = real_create_swapchain(session, info, swapchain);
@@ -248,6 +287,11 @@ static XrResult XRAPI_PTR adapted_create_swapchain(XrSession session, const XrSw
         swapchain_info *entry = calloc(1, sizeof(*entry));
         if (entry) {
             entry->handle = *swapchain;
+            entry->session = session;
+            pthread_mutex_lock(&fade_mutex);
+            for (fade_session_info *owner = fade_sessions; owner; owner = owner->next)
+                if (owner->session == session) { entry->instance = owner->instance; break; }
+            pthread_mutex_unlock(&fade_mutex);
             entry->width = info->width;
             entry->height = info->height;
             entry->array_size = info->arraySize;
@@ -273,7 +317,9 @@ static void register_images(XrSwapchain swapchain, uint32_t count, XrSwapchainIm
         if (entry->handle == swapchain) { array_size = entry->array_size; break; }
     }
     pthread_mutex_unlock(&chain_mutex);
-    for (uint32_t i = 0; i < count; ++i) names[i] = images[i].image;
+    for (uint32_t i = 0; i < count; ++i) {
+        names[i] = images[i].image;
+    }
     quest_vr_register_images((uint64_t) (uintptr_t) swapchain, names, count);
 
     if (quest_vr_is_mobileglues()) {
@@ -322,6 +368,12 @@ static XrResult XRAPI_PTR adapted_destroy_swapchain(XrSwapchain swapchain) {
 }
 
 static XrResult XRAPI_PTR adapted_release_image(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo *info) {
+    XrSession session = XR_NULL_HANDLE;
+    pthread_mutex_lock(&chain_mutex);
+    for (swapchain_info *entry = chains; entry; entry = entry->next)
+        if (entry->handle == swapchain) { session = entry->session; break; }
+    pthread_mutex_unlock(&chain_mutex);
+    quest_vr_stereo_before_release(session);
     glFlush();
     return real_release_image(swapchain, info);
 }
@@ -338,7 +390,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const 
     INTERCEPT(xrDestroyInstance, real_destroy_instance, adapted_destroy_instance)
     INTERCEPT(xrCreateSession, real_create_session, adapted_create_session)
     INTERCEPT(xrDestroySession, real_destroy_session, adapted_destroy_session)
-    INTERCEPT(xrEndFrame, real_end_frame, adapted_end_frame)
+    INTERCEPT(xrBeginSession, real_begin_session, adapted_begin_session)
+    INTERCEPT(xrEndSession, real_end_session, adapted_end_session)
+    INTERCEPT(xrEndFrame, real_end_frame, fade_end_frame)
     INTERCEPT(xrCreateSwapchain, real_create_swapchain, adapted_create_swapchain)
     INTERCEPT(xrEnumerateSwapchainImages, real_enumerate_images, adapted_enumerate_images)
     INTERCEPT(xrDestroySwapchain, real_destroy_swapchain, adapted_destroy_swapchain)

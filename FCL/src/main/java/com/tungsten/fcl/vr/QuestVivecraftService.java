@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
@@ -34,17 +35,34 @@ import java.util.logging.Logger;
 import java.util.zip.ZipFile;
 
 public final class QuestVivecraftService {
-    private static final String API = "https://api.github.com/repos/QuestCraftPlusPlus/VivecraftMod/releases?per_page=100&page=";
-    private static final String DOWNLOAD_PATH = "/QuestCraftPlusPlus/VivecraftMod/releases/download/";
     private static final long MAX_ASSET_BYTES = 64L * 1024 * 1024;
     private static final int MAX_API_BYTES = 4 * 1024 * 1024;
     private static final Object INSTALL_LOCK = new Object();
-    private static final Pattern MC_VERSION = Pattern.compile("(?<![0-9.])1\\.(?:1[0-9]|[2-9][0-9])(?:\\.[0-9]+)?(?![0-9.])");
+    private static final Pattern MC_VERSION = Pattern.compile("(?<![0-9.])(?:1\\.(?:1[0-9]|[2-9][0-9])|[2-9][0-9]\\.[0-9]+)(?:\\.[0-9]+)?(?![0-9.])");
     private static final Pattern INVALID_FILE_CHARACTER = Pattern.compile("[\\\\/:*?\"<>|\\p{Cntrl}]");
     private final Transport transport;
 
     public enum Error { NETWORK, UNSUPPORTED, INVALID_ASSET, INCOMPATIBLE, CONFLICT, DESTINATION, INTEGRITY }
     public enum Phase { DOWNLOADING, VERIFYING, INSTALLING }
+
+    public enum Source {
+        QUESTCRAFT("QuestCraft", "QuestCraftPlusPlus/VivecraftMod"),
+        CFF1028("cff1028", "cff1028/VivecraftMod");
+
+        public final String displayName, releasesUrl;
+        private final String apiPath, downloadPath;
+
+        Source(String displayName, String repository) {
+            this.displayName = displayName;
+            releasesUrl = "https://github.com/" + repository + "/releases";
+            apiPath = "/repos/" + repository + "/releases";
+            downloadPath = "/" + repository + "/releases/download/";
+        }
+
+        @Override public String toString() {
+            return displayName;
+        }
+    }
 
     public static final class ServiceException extends IOException {
         public final Error error;
@@ -67,12 +85,14 @@ public final class QuestVivecraftService {
     public interface Progress { void onProgress(Phase phase, long completed, long total); }
 
     public static final class ReleaseAsset {
+        public final Source source;
         public final long id;
         public final String releaseName, tag, fileName, url, publishedAt, sha256;
         public final long size;
         public final boolean prerelease;
-        private ReleaseAsset(long id, String releaseName, String tag, String fileName, String url,
+        private ReleaseAsset(Source source, long id, String releaseName, String tag, String fileName, String url,
                              String publishedAt, String sha256, long size, boolean prerelease) {
+            this.source = source;
             this.id = id; this.releaseName = releaseName; this.tag = tag; this.fileName = fileName;
             this.url = url; this.publishedAt = publishedAt; this.sha256 = sha256;
             this.size = size; this.prerelease = prerelease;
@@ -105,19 +125,27 @@ public final class QuestVivecraftService {
     }
 
     public List<ReleaseAsset> fetchReleases(QuestVivecraftTarget target, Cancellation cancellation) throws IOException {
+        return fetchReleases(target, Source.QUESTCRAFT, cancellation);
+    }
+
+    public List<ReleaseAsset> fetchReleases(QuestVivecraftTarget target, Source source, Cancellation cancellation) throws IOException {
         requireTarget(target);
+        Objects.requireNonNull(source);
         List<ReleaseAsset> result = new ArrayList<>();
         try {
             for (int page = 1; page <= 10; page++) {
                 cancellation.check();
                 String json;
-                try (InputStream input = transport.open(new URL(API + page), cancellation)) {
+                try (InputStream input = transport.open(new URL("https://api.github.com" + source.apiPath
+                        + "?per_page=100&page=" + page), cancellation)) {
                     json = new String(readLimited(input, MAX_API_BYTES, cancellation), StandardCharsets.UTF_8);
                 }
                 JsonArray releases = JsonParser.parseString(json).getAsJsonArray();
-                result.addAll(parseReleases(json, target));
+                result.addAll(parseReleases(json, target, source));
                 if (releases.size() < 100) break;
             }
+        } catch (CancellationException e) {
+            throw e;
         } catch (ServiceException e) {
             throw e;
         } catch (IOException | IllegalStateException | com.google.gson.JsonParseException e) {
@@ -129,7 +157,12 @@ public final class QuestVivecraftService {
     }
 
     static List<ReleaseAsset> parseReleases(String json, QuestVivecraftTarget target) throws IOException {
+        return parseReleases(json, target, Source.QUESTCRAFT);
+    }
+
+    static List<ReleaseAsset> parseReleases(String json, QuestVivecraftTarget target, Source source) throws IOException {
         requireTarget(target);
+        Objects.requireNonNull(source);
         List<ReleaseAsset> result = new ArrayList<>();
         try {
             for (JsonElement element : JsonParser.parseString(json).getAsJsonArray()) {
@@ -152,13 +185,13 @@ public final class QuestVivecraftService {
                             || !matchesMinecraft(fileName, minecraftHints, target.minecraftVersion)
                             || !matchesLoaderHint(fileHints, target.loader)) continue;
                     String url = text(asset, "browser_download_url");
-                    if (!validAssetUrl(url, fileName)) continue;
+                    if (!validAssetUrl(url, fileName, source)) continue;
                     long size = asset.get("size").getAsLong();
                     long id = asset.get("id").getAsLong();
                     if (size <= 0 || size > MAX_ASSET_BYTES || id <= 0) continue;
                     String digest = text(asset, "digest");
                     if (!digest.isEmpty() && !digest.matches("sha256:[a-fA-F0-9]{64}")) continue;
-                    result.add(new ReleaseAsset(id, name.isEmpty() ? tag : name, tag, fileName, url,
+                    result.add(new ReleaseAsset(source, id, name.isEmpty() ? tag : name, tag, fileName, url,
                             text(release, "published_at"), digest.isEmpty() ? "" : digest.substring(7).toLowerCase(Locale.ROOT),
                             size, bool(release, "prerelease")));
                 }
@@ -210,8 +243,8 @@ public final class QuestVivecraftService {
                                  Cancellation cancellation, Progress progress) throws IOException {
         requireTarget(target);
         cancellation.check();
-        if (!validAssetUrl(asset.url, asset.fileName) || asset.size <= 0 || asset.size > MAX_ASSET_BYTES)
-            throw new ServiceException(Error.INVALID_ASSET, "Invalid official release asset.");
+        if (!validAssetUrl(asset.url, asset.fileName, asset.source) || asset.size <= 0 || asset.size > MAX_ASSET_BYTES)
+            throw new ServiceException(Error.INVALID_ASSET, "Invalid source release asset.");
         List<InstalledMod> existing = scanInstalled(target, cancellation);
         if (existing.size() == 1 && existing.get(0).compatible && !asset.sha256.isEmpty()
                 && asset.sha256.equals(existing.get(0).sha256)) return new InstallResult(existing.get(0), true);
@@ -391,15 +424,19 @@ public final class QuestVivecraftService {
     }
 
     static boolean validAssetUrl(String value, String fileName) {
-        if (!safeFileName(fileName)) return false;
+        return validAssetUrl(value, fileName, Source.QUESTCRAFT);
+    }
+
+    static boolean validAssetUrl(String value, String fileName, Source source) {
+        if (source == null || !safeFileName(fileName)) return false;
         try {
             URI uri = URI.create(value);
             if (!"https".equals(uri.getScheme()) || !"github.com".equals(uri.getHost())
                     || uri.getPort() != -1 || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null)
                 return false;
             String path = uri.getPath();
-            if (!path.startsWith(DOWNLOAD_PATH)) return false;
-            String rest = path.substring(DOWNLOAD_PATH.length());
+            if (!path.startsWith(source.downloadPath)) return false;
+            String rest = path.substring(source.downloadPath.length());
             String[] parts = rest.split("/", -1);
             return parts.length == 2 && !parts[0].isEmpty() && !parts[0].equals(".") && !parts[0].equals("..")
                     && parts[1].equals(fileName) && !rest.contains("\\");
@@ -415,15 +452,24 @@ public final class QuestVivecraftService {
     }
 
     private static InputStream openOfficial(URL initial, Cancellation cancellation) throws IOException {
+        Source source = null;
+        for (Source candidate : Source.values()) {
+            if (initial.getHost().equals("api.github.com") && initial.getPath().equals(candidate.apiPath)
+                    || initial.getHost().equals("github.com") && initial.getPath().startsWith(candidate.downloadPath)) {
+                source = candidate;
+                break;
+            }
+        }
+        if (source == null) throw new ServiceException(Error.INVALID_ASSET, "Unknown release source.");
         URL url = initial;
         for (int redirects = 0; redirects < 6; redirects++) {
             cancellation.check();
-            if (!allowedNetworkUrl(url)) throw new ServiceException(Error.INVALID_ASSET, "Unexpected download host.");
+            if (!allowedNetworkUrl(url, source)) throw new ServiceException(Error.INVALID_ASSET, "Unexpected download host.");
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(15000);
             connection.setReadTimeout(30000);
-            connection.setRequestProperty("User-Agent", "FCL-Quest-VR/preview2");
+            connection.setRequestProperty("User-Agent", "FCL-Quest-VR");
             connection.setRequestProperty("Accept", url.getHost().equals("api.github.com")
                     ? "application/vnd.github+json" : "application/octet-stream");
             connection.setRequestProperty("Accept-Encoding", "identity");
@@ -456,11 +502,12 @@ public final class QuestVivecraftService {
         throw new ServiceException(Error.NETWORK, "Too many GitHub redirects.");
     }
 
-    private static boolean allowedNetworkUrl(URL url) {
-        if (!url.getProtocol().equals("https") || url.getPort() != -1 || url.getUserInfo() != null) return false;
+    private static boolean allowedNetworkUrl(URL url, Source source) {
+        if (!url.getProtocol().equals("https") || url.getPort() != -1 || url.getUserInfo() != null
+                || url.getRef() != null) return false;
         return switch (url.getHost()) {
-            case "api.github.com" -> url.getPath().equals("/repos/QuestCraftPlusPlus/VivecraftMod/releases");
-            case "github.com" -> url.getPath().startsWith(DOWNLOAD_PATH);
+            case "api.github.com" -> url.getPath().equals(source.apiPath);
+            case "github.com" -> url.getPath().startsWith(source.downloadPath);
             case "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com" -> true;
             default -> false;
         };

@@ -2,6 +2,7 @@ package com.tungsten.fclauncher
 
 import android.content.Context
 import com.mio.data.Renderer
+import com.mio.plugin.RendererPlugin
 import java.io.Serializable
 
 /**
@@ -19,6 +20,12 @@ class FCLConfig(
     var useVKDriverSystem = false
 
     var isVrEnabled = false
+
+    var vrStereoSyncEnabled = true
+
+    var sfpewLayerEnabled = RendererPlugin.isSfpewLayerEnabled(renderer)
+
+    var highGameThreadPriority = true
 
     var installedModLoaders: InstalledModLoaders? = null
 

@@ -21,8 +21,8 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $workRoot 'dist' }
 $buildFullPath = [IO.Path]::GetFullPath($BuildDirectory)
 $outputFullPath = [IO.Path]::GetFullPath($OutputDirectory)
 $provenance = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'provenance.json') -Raw | ConvertFrom-Json
-if (-not $provenance.patched_files -or $provenance.patched_files.Count -ne 4) {
-    throw 'provenance.json does not contain the four reviewed source hashes.'
+if (-not $provenance.patched_files) {
+    throw 'provenance.json does not contain reviewed source hashes.'
 }
 foreach ($changedFile in $provenance.patched_files) {
     $file = Join-Path $sourceFullPath $changedFile.path
@@ -33,7 +33,7 @@ foreach ($changedFile in $provenance.patched_files) {
 $oldEpoch = $env:SOURCE_DATE_EPOCH
 $oldTimezone = $env:TZ
 try {
-    $env:SOURCE_DATE_EPOCH = '1786287886'
+    $env:SOURCE_DATE_EPOCH = $provenance.build.SOURCE_DATE_EPOCH
     $env:TZ = 'UTC'
     New-Item -ItemType Directory -Force -Path $buildFullPath, $outputFullPath | Out-Null
     & $cmake -S $sourceFullPath -B $buildFullPath -G Ninja `

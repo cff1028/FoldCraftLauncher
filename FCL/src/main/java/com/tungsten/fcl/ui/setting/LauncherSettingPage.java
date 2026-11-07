@@ -420,6 +420,9 @@ public class LauncherSettingPage extends FCLPage implements LauncherSettingAdapt
             case SWITCH_QUEST_VR_TRANSITION_ANIMATION:
                 QuestVrPreferences.setTransitionAnimationEnabled(getContext(), checked);
                 break;
+            case SWITCH_HIGH_GAME_THREAD_PRIORITY:
+                QuestVrPreferences.setHighGameThreadPriorityEnabled(getContext(), checked);
+                break;
             case SWITCH_IGNORE_NOTCH:
                 ThemeEngine.getInstance().applyAndSave(getContext(), getActivity().getWindow(), checked);
                 getActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN);

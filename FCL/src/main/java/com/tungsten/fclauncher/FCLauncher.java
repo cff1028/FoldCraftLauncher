@@ -63,6 +63,7 @@ public class FCLauncher {
         printTaskTitle(bridge, "Start " + task);
         log(bridge, "Renderer: " + bridge.getRenderer());
         log(bridge, "Quest VR: " + config.isVrEnabled());
+        log(bridge, "SFPEW compatibility layer: " + config.getSfpewLayerEnabled());
         log(bridge, "Device: " + getDeviceName());
         log(bridge, "Architecture: " + Architecture.archAsString(Architecture.getDeviceArchitecture()));
         log(bridge, "CPU: " + getSocName());
@@ -192,7 +193,7 @@ public class FCLauncher {
         ArrayList<String> argList = new ArrayList<>(Arrays.asList(config.getArgs()));
         argList.add(0, config.getJavaPath() + "/bin/java");
         // SFPEW 兼容层开启时游戏 GL 符号经包装层句柄解析（LWJGL 按 libname 加载），底座渲染器只承担 EGL 与驱动
-        String glLibName = RendererPlugin.isSfpewLayerEnabled(config.getRenderer())
+        String glLibName = config.getSfpewLayerEnabled()
                 ? FCLPath.NATIVE_LIB_DIR + "/libSimpleFPEWrapper.so"
                 : config.getRenderer().getGLPath();
         String[] args = new String[argList.size()];
@@ -298,9 +299,7 @@ public class FCLauncher {
     private static void addRendererEnv(FCLConfig config, HashMap<String, String> envMap) {
         addRendererEnvInner(config, envMap);
         Renderer renderer = config.getRenderer();
-        // SFPEW 兼容层（内置渲染器按 AAMC 硬编码规则默认启用、自带 FPE 者关闭；插件渲染器由高级设置开关控制）：
-        // 包装后端与底座 EGL 同源（SFPEW_EGL=POJAVEXEC_EGL），native 桥按 SFPEW_LAYER 路由 makeCurrent/swap 生命周期
-        if (RendererPlugin.isSfpewLayerEnabled(renderer)) {
+        if (config.getSfpewLayerEnabled()) {
             envMap.put("SFPEW_LAYER", "1");
             String sfpewEgl = envMap.get("POJAVEXEC_EGL");
             if (sfpewEgl != null) {
@@ -327,7 +326,7 @@ public class FCLauncher {
             envMap.put("SDL_EGL_LIBRARY", egl);
         }
         String gl;
-        if (RendererPlugin.isSfpewLayerEnabled(renderer)) {
+        if (config.getSfpewLayerEnabled()) {
             // 兼容层开启：GL 库固定为包装层（打包在主 APK native 目录），底座只承担 EGL
             gl = FCLPath.NATIVE_LIB_DIR + "/libSimpleFPEWrapper.so";
         } else {
@@ -470,6 +469,15 @@ public class FCLauncher {
         return new File(config.getContext().getFilesDir(), "renderers/mobileglues");
     }
 
+    private static boolean usesQuestPerformancePolicy(FCLConfig config) {
+        if (config.isVrEnabled()) return true;
+        boolean questManufacturer = "Oculus".equalsIgnoreCase(Build.MANUFACTURER)
+                || "Meta".equalsIgnoreCase(Build.MANUFACTURER);
+        String model = Build.MODEL.toLowerCase(Locale.ROOT);
+        return questManufacturer && (model.startsWith("quest") || model.startsWith("meta quest")
+                || model.startsWith("oculus quest"));
+    }
+
     private static void setEnv(FCLConfig config, FCLBridge bridge, boolean render) {
         HashMap<String, String> envMap = new HashMap<>();
         addCommonEnv(config, envMap);
@@ -480,8 +488,25 @@ public class FCLauncher {
         addCustomEnv(config, envMap);
         if (render && !config.isVrEnabled() && config.getRenderer().isEqual(Renderer.ID_MOBILEGLUES)) {
             envMap.put("MG_DIR_PATH", getNormalMobileGluesDirectory(config).getAbsolutePath());
+            if (config.getRenderer().getPath().isEmpty() && !config.getSfpewLayerEnabled()) {
+                for (String key : new String[]{"SFPEW_LAYER", "SFPEW_EGL", "SFPEW_RELAXED_CONTEXT"}) {
+                    envMap.remove(key);
+                    try {
+                        Os.unsetenv(key);
+                    } catch (android.system.ErrnoException e) {
+                        throw new IllegalStateException("Unable to clear incompatible renderer environment: " + key, e);
+                    }
+                }
+            }
         }
         QuestVrRuntime.applyEnvironment(config, envMap);
+        if (!render) envMap.put("FCL_VR_STEREO_SYNC", "0");
+        if (render && usesQuestPerformancePolicy(config)) {
+            envMap.put("FCL_QUEST_GPU_GUARD", "1");
+            if (!config.isVrEnabled()) envMap.put("FORCE_VSYNC", "true");
+        } else {
+            envMap.remove("FCL_QUEST_GPU_GUARD");
+        }
         printTaskTitle(bridge, "Env Map");
         for (String key : envMap.keySet()) {
             log(bridge, "Env: " + key + "=" + envMap.get(key));
@@ -702,7 +727,8 @@ public class FCLauncher {
     }
 
     public static FCLBridge launchMinecraft(FCLConfig config) {
-        FCLBridge bridge = launchProcess(config, FCLPath.LATEST_GAME_LOG, "Minecraft", true, true, true);
+        int priority = config.getHighGameThreadPriority() ? Thread.MAX_PRIORITY : Thread.NORM_PRIORITY;
+        FCLBridge bridge = launchProcess(config, FCLPath.LATEST_GAME_LOG, "Minecraft", true, true, priority);
         bridge.setLaunchConfig(config);
         // 标志先落在 bridge 实例上：launch 线程无 Looper，不能在此触碰 CallbackBridge（类初始化含 Choreographer）
         bridge.setCleanroomActive(config.getInstalledModLoaders() != null
@@ -713,14 +739,15 @@ public class FCLauncher {
     }
 
     public static FCLBridge launchJarExecutor(FCLConfig config) {
-        return launchProcess(config, "latest_jar_executor.log", "Jar Executor", true, false, false);
+        Integer priority = usesQuestPerformancePolicy(config) ? Thread.NORM_PRIORITY : null;
+        return launchProcess(config, "latest_jar_executor.log", "Jar Executor", true, false, priority);
     }
 
     public static FCLBridge launchAPIInstaller(FCLConfig config) {
-        return launchProcess(config, "latest_api_installer.log", "API Installer", false, false, false);
+        return launchProcess(config, "latest_api_installer.log", "API Installer", false, false, null);
     }
 
-    private static FCLBridge launchProcess(FCLConfig config, String logName, String task, boolean render, boolean logModList, boolean highPriority) {
+    private static FCLBridge launchProcess(FCLConfig config, String logName, String task, boolean render, boolean logModList, Integer threadPriority) {
 
         // initialize FCLBridge
         FCLBridge bridge = new FCLBridge();
@@ -728,6 +755,17 @@ public class FCLauncher {
         Thread thread = new Thread(() -> {
             try {
                 logStartInfo(config, bridge, task);
+                if (threadPriority != null) {
+                    if (threadPriority == Thread.NORM_PRIORITY) {
+                        try {
+                            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
+                        } catch (SecurityException e) {
+                            log(bridge, "Unable to set normal CPU priority: " + e.getMessage());
+                        }
+                    }
+                    log(bridge, "JVM launch thread: Java priority " + Thread.currentThread().getPriority()
+                            + ", nice " + android.os.Process.getThreadPriority(android.os.Process.myTid()));
+                }
                 if (logModList) {
                     logModList(bridge);
                 }
@@ -756,9 +794,7 @@ public class FCLauncher {
             }
         });
 
-        if (highPriority) {
-            thread.setPriority(Thread.MAX_PRIORITY);
-        }
+        if (threadPriority != null) thread.setPriority(threadPriority);
         bridge.setThread(thread);
 
         return bridge;

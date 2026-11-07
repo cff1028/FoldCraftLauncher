@@ -261,6 +261,7 @@ public final class LauncherHelper {
                             );
                             launcher.setVrEnabled(setting.isVrEnabled());
                             launcher.setVrGraphicsSettings(setting.getVrRenderScalePercent(), setting.getVrFsaaEnabled());
+                            launcher.setVrStereoSyncEnabled(setting.getVrStereoSyncEnabled());
                             String jnaVersion = null;
                             String lwjglVersion = null;
                             VersionNumber lwjglMax = null;
@@ -306,7 +307,12 @@ public final class LauncherHelper {
                             return checkMod(fclBridge, repository.getGameVersion(selectedVersion).orElse(""), skip, scannedModsRef.get());
                         }).thenComposeAsync(fclBridge -> {
                             GameOption gameOption = new GameOption(repository.getRunDirectory(selectedVersion).getAbsolutePath());
-                            gameOption.set("preferredGraphicsBackend", setting.getGraphicsBackend());
+                            String graphicsBackend = setting.getGraphicsBackend();
+                            if ("default".equals(graphicsBackend) && launchRenderer.isEqual(Renderer.ID_MOBILEGLUES)) {
+                                graphicsBackend = "opengl";
+                                LOG.info("Built-in MobileGlues selected: skipping the default Vulkan probe");
+                            }
+                            gameOption.set("preferredGraphicsBackend", graphicsBackend);
                             gameOption.set("startedCleanly", "true");
                             gameOption.save();
                             return Task.completed(fclBridge);
@@ -506,7 +512,7 @@ public final class LauncherHelper {
                 if (!version.isEmpty()) {
                     // SFPEW 兼容层启用时补齐固定管线能力，旧版 MC 可正常运行，跳过 min 下界判定；
                     // max 上界保留——层不扩展渲染器自身的现代 GL 上限
-                    boolean sfpewLayer = RendererPlugin.isSfpewLayerEnabled(renderer);
+                    boolean sfpewLayer = RendererPlugin.isSfpewLayerEnabled(renderer, version);
                     if (!renderer.getMinMCver().isEmpty() && !sfpewLayer) {
                         if (GameVersionNumber.compare(version, renderer.getMinMCver()) < 0) {
                             Schedulers.androidUIThread().execute(() -> new FCLAlertDialog.Builder(context)

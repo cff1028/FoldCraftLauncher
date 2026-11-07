@@ -1,35 +1,65 @@
 {
-  "description": "MobileGlues 2.0.0 shader-source submission fix for FCL Quest VR",
-  "source_change": "Shader source count/byte length, parameter/object validation, empty replacement, allocation/overflow guards, failure fallback, and context-scoped shader-submission errors. Unrelated legacy GL error policy preserved.",
+  "description": "MobileGlues 2.0.1 Dev1 with Minecraft 26.3 and FCL Quest VR compatibility fixes",
+  "source_change": "Official uniform tokenization/default-value fixes and context fallback at fcdf914. Local shader-source count/length, object/argument and error guards retained; procedure lookup remains scoped to the renderer. Uniform defaults belong to the EGL share group, track submitted and successfully compiled sources separately, respect deferred shader deletion and dynamically enumerate attachments. Defaults are restored after successful linking through GLES program-uniform functions without changing the current program or consuming pending errors.",
   "patched_files": [
     {
-      "path": "gl/shader.cpp",
-      "sha256": "46795ad94ee167a5c2d0e5582c26d4c231be744df3c64bb2e5fcff8b71b8a1c6",
-      "original_sha256": "ed610b57328dce43375e9e0266c26edbe2bc26e9f90d241eea7031c28b7d090d"
-    },
-    {
-      "path": "gl/shader.h",
-      "sha256": "4f464e8386a0ed19d4012186ce9c52ba27141261fd71ce7429f53b370be06734",
-      "original_sha256": "a2b47ca7c96a6ebf60e2445e5db0003de984dd9f7e2faf0bf9c79c4628a34bb5"
-    },
-    {
-      "path": "gl/getter.cpp",
-      "sha256": "11ef0eb7113a42cbdc6894dac7cfaff65d15fe521c3543dddcf573b4980dcf8c",
-      "original_sha256": "1f7272e42e6ecfb4d601cef882295cd7167a1925a3bcc8cbd260406122c7e288"
+      "path": "CMakeLists.txt",
+      "original_sha256": "1eca9dbb1fc8919309fc931653c9f51f3f2b80621c4e2ef0957f5e6c74ab407e",
+      "sha256": "8bda03a116052981536dfa1052263a0af26135ac11d8dd6fd5ba66ec256df084"
     },
     {
       "path": "egl/context.h",
-      "sha256": "91008e38a5f4dca75346e7002f8e33dedb09bc1a1d6e96fe0e500e76a861df3a",
-      "original_sha256": "4b18a5266b6dfca2c8f8d88f65b2adfd59e971d9f6a764c70f26c5ca470340b6"
+      "original_sha256": "4b18a5266b6dfca2c8f8d88f65b2adfd59e971d9f6a764c70f26c5ca470340b6",
+      "sha256": "98bdd3992d63a71af1e84c72b1c92c2030deaa0205476c17ecf92f623aad67cf"
+    },
+    {
+      "path": "gl/getter.cpp",
+      "original_sha256": "9127f5a2ffc0429a705c80b917f4c02abc9d3621ff0e6572397cdfdef047ae5f",
+      "sha256": "076c60842bc90d6b66a36f1d35091d3447a9d4f300320f6a7b055bc39948a920"
+    },
+    {
+      "path": "gl/gl_native.cpp",
+      "original_sha256": "56dec4f2228668b76da8d04d3a8bd6305d2c0e141916b35d87b93031f29f834b",
+      "sha256": "a5a7e3630c52e34499ffc0a88cc5ff8e4e3c6e1bc3c7c16ea661d7e810bb6a80"
+    },
+    {
+      "path": "gl/program.cpp",
+      "original_sha256": "93babedda0c40cb8eff01ad7784bae4226f8f9520d4baca36262daaafd2303aa",
+      "sha256": "6e439dbcc34306ac983d72ab9f3eb025fd541715b6f6cc665a0e846d145aa542"
+    },
+    {
+      "path": "gl/shader.cpp",
+      "original_sha256": "8aac0494c5b523ab1b581cbe851c1cf17404497538350f4a0be3e911a8e7d69b",
+      "sha256": "5d6cd1c29703423f4c9ee93c410be3358c194cc062616de2bf72a7929d5eb2fe"
+    },
+    {
+      "path": "gl/shader.h",
+      "original_sha256": "a2b47ca7c96a6ebf60e2445e5db0003de984dd9f7e2faf0bf9c79c4628a34bb5",
+      "sha256": "bb3013b205c4c7fc8f6dcc8a1e4a95e8614a3f07cc55b40f98c276515cc7832c"
+    },
+    {
+      "path": "gl/shader_defaults.cpp",
+      "original_sha256": null,
+      "sha256": "fb2bdfe766f4aedc3978cdf708867d0ac0d3d333cda19d41936b85badc553078"
+    },
+    {
+      "path": "gl/shader_defaults.h",
+      "original_sha256": null,
+      "sha256": "cc65420bee1bc1e9fe741c99a46d78364d125b7f881f7a3b922d3bebb472ea85"
+    },
+    {
+      "path": "glx/lookup.cpp",
+      "original_sha256": "894fb518435e7de0b4233301851282e42a7bf078f9ed8097aa9ef9d3fb345715",
+      "sha256": "eab1ee9b4ee56da3998eb259876eb96af5c13e52ff3aab8217ece9f39470bc92"
     }
   ],
   "sources": [
     {
       "name": "MobileGlues",
       "repository": "https://github.com/MobileGL-Dev/MobileGlues",
-      "revision": "fbc4e412e353302607ba36489b2dd573b5becb25",
-      "archive_url": "https://codeload.github.com/MobileGL-Dev/MobileGlues/zip/fbc4e412e353302607ba36489b2dd573b5becb25",
-      "archive_sha256": "0c642f8e49aa098d8c1bd265a8c167ec4135024398e82d2915fd03f338842b83",
+      "revision": "fcdf91456c1b3b5e77e5264cffe682595c13113f",
+      "archive_url": "https://codeload.github.com/MobileGL-Dev/MobileGlues/zip/fcdf91456c1b3b5e77e5264cffe682595c13113f",
+      "archive_sha256": "3245edecfb35fea3b3391ee8fc3d4be76ba86138a80ccda9873b5bf3cf811e65",
       "source_subdirectory": "."
     },
     {
@@ -83,12 +113,15 @@
     "type": "Release",
     "lto": "ThinLTO",
     "CMAKE_DISABLE_FIND_PACKAGE_Git": true,
-    "SOURCE_DATE_EPOCH": "1786287886",
+    "SOURCE_DATE_EPOCH": "1788669897",
     "TZ": "UTC"
   },
   "library": {
     "name": "libmobileglues.so",
-    "size": 6401936,
-    "sha256": "2e3a42a22ff509520a709c9300af7c1efd2d10f91398b41d41d8088fc82c857b"
-  }
+    "size": 6468856,
+    "sha256": "fc768f95c8d6018072e2676071f400fc30fbf86948e5bc7706e801b9fb79c3b3"
+  },
+  "patches": [
+    "mobileglues-quest-compat.patch"
+  ]
 }
