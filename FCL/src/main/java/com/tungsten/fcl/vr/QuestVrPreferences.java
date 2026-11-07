@@ -9,7 +9,7 @@ public final class QuestVrPreferences {
     private QuestVrPreferences() {}
 
     public static boolean isTransitionAnimationEnabled(Context context) {
-        return context.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+        return QuestVrFeatures.isEnabled(context) && context.getSharedPreferences("launcher", Context.MODE_PRIVATE)
                 .getBoolean(TRANSITION_ANIMATION_KEY, true);
     }
 

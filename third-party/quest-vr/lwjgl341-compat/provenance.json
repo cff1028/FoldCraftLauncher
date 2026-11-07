@@ -1,0 +1,66 @@
+{
+  "name": "FCL Quest VR LWJGL 3.4.1 compatibility bindings",
+  "version": "3.4.1-compat.1",
+  "date": "2026-11-07",
+  "license": "BSD-3-Clause",
+  "openxr_source": {
+    "repository": "https://github.com/QuestCraftPlusPlus/lwjgl3",
+    "commit": "ec0bbebe4379f59fe956c9a79e44d3b09837b134",
+    "archive": "https://codeload.github.com/QuestCraftPlusPlus/lwjgl3/zip/ec0bbebe4379f59fe956c9a79e44d3b09837b134",
+    "archive_sha256": "88bf057b3fbf320d36b922233b84a9026d9789638771d0defe2c5eccdec3e099"
+  },
+  "opengles_source": {
+    "url": "https://repo.maven.apache.org/maven2/org/lwjgl/lwjgl-opengles/3.3.3/lwjgl-opengles-3.3.3-sources.jar",
+    "sha256": "a5a930365ccc5c89ed17dbfed328cb174f2ef696f9427274e806ead1a928c2d2"
+  },
+  "changes": [
+    "Adapt three callback classes/interfaces to Callback.Descriptor, retaining public CIF/getCallInterface APIs.",
+    "Replace all 1542 absolute-address UNSAFE operations with equivalent MemoryUtil scalar operations.",
+    "Implement create(address, container, mark, position, limit, capacity) on all 335 StructBuffer subclasses.",
+    "Remove obsolete package-only NonnullDefault annotations and unused EGL Javadoc imports.",
+    "Compile every module source against packaged LWJGL 3.4.1 core; retain Android OpenXR APIs and all 872 GLES JNI method signatures."
+  ],
+  "compiler": "javac 17.0.12",
+  "compiler_options": [
+    "--release",
+    "8",
+    "-encoding",
+    "UTF-8"
+  ],
+  "sources.zip": {
+    "bytes": 1918152,
+    "sha256": "0965ec8a0cd06ce2d0049b315452a5a5ca9a5c89c6f2455d0fc52b72776bee7d"
+  },
+  "dependencies": {
+    "FCL/src/main/assets/app_runtime/lwjgl/3.4.1/lwjgl.jar": {
+      "bytes": 1169477,
+      "sha256": "a675ff2a93ecb9f94bdd72bb3a9ab648f4413225749c46fc83d5aae8a8260275"
+    },
+    "FCL/src/main/assets/app_runtime/lwjgl/3.4.1/lwjgl-vulkan.jar": {
+      "bytes": 8540747,
+      "sha256": "75957d2845320adf2799c9f154c4e2b35202cf007d0d1e36a238a2fb212391fa"
+    },
+    "FCL/src/main/assets/app_runtime/lwjgl/3.4.1/lwjgl-3.4.1-merged-modules.jar": {
+      "bytes": 2094689,
+      "sha256": "d2e1a65beb53ecbc4538ec3624a5e129adc46174198b3ccaeb49b3e5ec4fbe18"
+    },
+    "LWJGL/3.3.3/libs/3.3.3/jsr305.jar": {
+      "bytes": 19936,
+      "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7"
+    }
+  },
+  "outputs": {
+    "lwjgl-opengles.jar": {
+      "bytes": 331849,
+      "sha256": "abec5c36f2832c6bb80259c2524d2e3e653072f48db160d4da718420e920e0e3"
+    },
+    "lwjgl-openxr.jar": {
+      "bytes": 1483490,
+      "sha256": "52e8e0845d4e1c09385fc42822112fd201b557d07957109953ef778fc5c6413a"
+    }
+  },
+  "android_gles_native": {
+    "bytes": 149144,
+    "sha256": "437f171d392ba1d8153ba4a53d4e81cc9e5c8f89f4a70e9b26d97472cf3bd398"
+  }
+}

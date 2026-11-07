@@ -7,7 +7,6 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
-import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
@@ -131,6 +130,11 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
         }
 
         if (fclBridge.isVrEnabled()) {
+            if (!com.tungsten.fcl.vr.QuestVrFeatures.isEnabled(this)) {
+                Logging.LOG.warning("Rejected VR activity while VR features are disabled");
+                finish();
+                return;
+            }
             questSession = QuestVrSession.get();
             if (questSession == null) {
                 finish();
@@ -164,14 +168,15 @@ public class JVMActivity extends FCLActivity implements TextureView.SurfaceTextu
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            // 键盘真实显隐轮询上报 SDL 输入通道，维持 SdlImeController 缓存标志与实际一致
+            // （标志漂移表现为开关键盘需点两次）；上报不受「禁用软键盘自适应」影响
+            int imeHeight = AndroidUtilKt.getImeOccludedHeight(getWindow().getDecorView());
+            SDLActivity.notifyImeVisibilityChanged(imeHeight > 0);
             if (menuType == MenuType.GAME && ((GameMenu) menu).getMenuSetting().isDisableSoftKeyAdjust()) {
                 return;
             }
-            int screenHeight = getWindow().getDecorView().getHeight();
-            Rect rect = new Rect();
-            getWindow().getDecorView().getWindowVisibleDisplayFrame(rect);
-            if (screenHeight * 2 / 3 > rect.bottom) {
-                textureView.setTranslationY(rect.bottom - screenHeight);
+            if (imeHeight > 0) {
+                textureView.setTranslationY(-imeHeight);
                 isTranslated = true;
             } else if (isTranslated) {
                 isTranslated = false;

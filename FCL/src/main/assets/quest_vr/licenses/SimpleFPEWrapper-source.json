@@ -1,9 +1,9 @@
 [
   {
     "repository": "https://github.com/MobileGL-Dev/SimpleFPEWrapper",
-    "revision": "ca8c6af26ca2996c3d07be90cde0e72ebf815935",
-    "archive_url": "https://codeload.github.com/MobileGL-Dev/SimpleFPEWrapper/zip/ca8c6af26ca2996c3d07be90cde0e72ebf815935",
-    "sha256": "3fdd178beb60930066eaa4b8d24488b6c60af9af215217c8bb0e46831520577f"
+    "revision": "3042d8a87b4d0952c705de35d13b262a3ae0f5a2",
+    "archive_url": "https://codeload.github.com/MobileGL-Dev/SimpleFPEWrapper/zip/3042d8a87b4d0952c705de35d13b262a3ae0f5a2",
+    "sha256": "aae152ecddec2bc4c1b68da1e3abc9ffb295a2f52f93632384a0de2ea9e79882"
   },
   {
     "repository": "https://github.com/KhronosGroup/SPIRV-Cross",

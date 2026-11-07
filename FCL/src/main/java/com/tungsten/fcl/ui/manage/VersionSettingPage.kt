@@ -35,6 +35,7 @@ import com.tungsten.fcl.util.WeakListenerHolder
 import com.tungsten.fcl.vr.VivecraftInspector
 import com.tungsten.fcl.vr.QuestVivecraftTargets
 import com.tungsten.fcl.vr.QuestVrGraphicsSettings
+import com.tungsten.fcl.vr.QuestVrFeatures
 import com.tungsten.fcl.vr.VrWarnings
 import com.tungsten.fclauncher.utils.FCLPath
 import com.tungsten.fclcore.event.Event
@@ -255,7 +256,7 @@ class VersionSettingPage(
         val targetVersion = versionId ?: return
         val targetProfile = profile
         val targetSetting = lastVersionSetting
-        if (globalSetting || !targetSetting.isVrEnabled) return
+        if (globalSetting || !QuestVrFeatures.isVrEnabled(context, targetSetting.isVrEnabled)) return
         val gameDirectory = targetProfile.repository.getRunDirectory(targetVersion).toPath()
         vrGraphicsJob = activity.lifecycleScope.launch {
             val graphics = withContext(Dispatchers.IO) {
@@ -267,14 +268,15 @@ class VersionSettingPage(
                 }
             }
             if (generation == vrGraphicsGeneration && profile === targetProfile &&
-                versionId == targetVersion && lastVersionSetting === targetSetting && targetSetting.isVrEnabled) {
+                versionId == targetVersion && lastVersionSetting === targetSetting &&
+                QuestVrFeatures.isVrEnabled(context, targetSetting.isVrEnabled)) {
                 adapter.setVrGraphicsSettings(graphics)
             }
         }
     }
 
     private fun editVrRenderScale() {
-        if (globalSetting || !lastVersionSetting.isVrEnabled) return
+        if (globalSetting || !QuestVrFeatures.isVrEnabled(context, lastVersionSetting.isVrEnabled)) return
         val currentScale = adapter.vrRenderScalePercent() ?: return
         val targetSetting = lastVersionSetting
         val dialog = EditDialog(context, currentScale.toString()) { }
@@ -282,6 +284,10 @@ class VersionSettingPage(
         dialog.getEditText().inputType = InputType.TYPE_CLASS_NUMBER
         dialog.getEditText().hint = context.getString(R.string.settings_vr_render_scale_range)
         dialog.binding.positive.setOnClickListener {
+            if (!QuestVrFeatures.isVrEnabled(context, targetSetting.isVrEnabled)) {
+                dialog.dismiss()
+                return@setOnClickListener
+            }
             val percent = dialog.getEditText().text.toString().trim().toIntOrNull()
             if (percent == null || percent !in QuestVrGraphicsSettings.MIN_RENDER_SCALE_PERCENT..
                     QuestVrGraphicsSettings.MAX_RENDER_SCALE_PERCENT) {
@@ -521,17 +527,16 @@ class VersionSettingPage(
                     )
                     builder.create().show()
                 }
-                adapter.update(
-                    lastVersionSetting,
-                    modpack.get(),
-                    enableSpecificSettings.get(),
-                    usedMemory.get()
-                )
+                // 仅增删随开关显隐的驱动行，不触发全量重绑，保留开关自身的滑动动画
+                adapter.updateVulkanDriverRow()
             }
 
             VersionSettingTag.VR -> {
                 val currentVersionId = versionId ?: return
-                if (globalSetting) return
+                if (globalSetting || !QuestVrFeatures.isEnabled(context)) {
+                    adapter.rebuild()
+                    return
+                }
                 val instanceSetting = profile.repository.specializeVersionSetting(currentVersionId)
                     ?: return
                 if (checked) {
@@ -556,7 +561,8 @@ class VersionSettingPage(
                             val target = QuestVivecraftTargets.capture(instanceProfile.repository, currentVersionId)
                             VivecraftInspector.inspect(File(target.gameDirectory, "mods")) to target
                         }
-                        if (profile === instanceProfile && versionId == currentVersionId && instanceSetting.isVrEnabled &&
+                        if (profile === instanceProfile && versionId == currentVersionId &&
+                            QuestVrFeatures.isVrEnabled(context, instanceSetting.isVrEnabled) &&
                             result != VivecraftInspector.Status.COMPATIBLE) {
                             VrWarnings.show(context, result, downloadTarget, null)
                         }

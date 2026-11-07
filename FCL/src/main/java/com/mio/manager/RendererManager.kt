@@ -152,7 +152,9 @@ object RendererManager {
     @JvmStatic
     fun getRendererForMode(id: String, vrEnabled: Boolean): Renderer {
         val allowed = getRenderersForMode(vrEnabled)
-        val resolvedId = if (id == "mobileglues") Renderer.ID_MOBILEGLUES else id
+        val resolvedId = if (id == "mobileglues" || (!vrEnabled && id == Renderer.ID_QUEST_MOBILEGLUES)) {
+            Renderer.ID_MOBILEGLUES
+        } else id
         return allowed.find { it.id == resolvedId }
             ?: if (vrEnabled) RENDERER_QUEST_MOBILEGLUES else RENDERER_NGGL4ES
     }

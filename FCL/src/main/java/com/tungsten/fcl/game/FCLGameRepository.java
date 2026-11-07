@@ -29,6 +29,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParseException;
 import com.google.gson.reflect.TypeToken;
+import com.mio.data.Renderer;
 import com.mio.manager.RendererManager;
 import com.mio.util.AndroidUtilKt;
 import com.mio.util.LauncherUtilKt;
@@ -159,7 +160,9 @@ public class FCLGameRepository extends DefaultGameRepository {
         super.refreshVersionsImpl();
         versions.keySet().forEach(this::loadLocalVersionSetting);
         versions.keySet().forEach(version -> {
-            if (isModpack(version)) {
+            // 整合包版本仅在首次检测（尚无本地设置文件）时自动开启特定设置；
+            // 已有设置则尊重用户对"使用全局设置"的选择，避免每次刷新都覆盖回来
+            if (isModpack(version) && !localVersionSettings.containsKey(version)) {
                 specializeVersionSetting(version);
             }
         });
@@ -420,6 +423,12 @@ public class FCLGameRepository extends DefaultGameRepository {
     }
 
     public LaunchOptions getLaunchOptions(String version, JavaVersion javaVersion, File gameDir, double scaleFactor, double cursorOffset) {
+        return getLaunchOptions(version, javaVersion, gameDir, scaleFactor, cursorOffset,
+                RendererManager.getRenderer(getVersionSetting(version).getRenderer()));
+    }
+
+    public LaunchOptions getLaunchOptions(String version, JavaVersion javaVersion, File gameDir,
+                                         double scaleFactor, double cursorOffset, Renderer renderer) {
         VersionSetting vs = getVersionSetting(version);
         int maxMemory = (int) (getAllocatedMemory(
                 vs.getMaxMemory() * 1024L * 1024L,
@@ -442,7 +451,7 @@ public class FCLGameRepository extends DefaultGameRepository {
                 .setHeight(FCLBridge.FORCE_RESOLUTION ? FCLBridge.FORCE_RESOLUTION_HEIGHT : (int) (AndroidUtilKt.getScreenHeight() * scaleFactor))
                 .setServerIp(vs.getServerIp())
                 .setVkDriverSystem(vs.isVKDriverSystem())
-                .setRenderer(RendererManager.getRenderer(vs.getRenderer()))
+                .setRenderer(renderer)
                 .setDebugLog(vs.isDebugLog());
 
         if (vs.isAutoMemory() && builder.getJavaArguments().stream().anyMatch(it -> it.startsWith("-Xmx"))) {

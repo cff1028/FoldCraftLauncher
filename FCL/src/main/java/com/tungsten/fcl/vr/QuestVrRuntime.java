@@ -24,12 +24,17 @@ public final class QuestVrRuntime {
     private QuestVrRuntime() {
     }
 
-    public static synchronized void install(Context context) throws IOException {
-        File directory = context.getDir("quest_vr", Context.MODE_PRIVATE);
+    public static synchronized void install(Context context, String lwjglVersion) throws IOException {
+        QuestVrFeatures.requireEnabled(context);
+        File directory = bindingDirectory(context, lwjglVersion);
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IOException("Cannot create VR binding directory: " + directory);
+        }
+        String prefix = "3.4.1".equals(lwjglVersion) ? "quest_vr/3.4.1/" : "quest_vr/";
         for (String name : JARS) {
             File destination = new File(directory, name);
             byte[] expected;
-            try (InputStream source = context.getAssets().open("quest_vr/" + name)) {
+            try (InputStream source = context.getAssets().open(prefix + name)) {
                 expected = digest(source);
             }
             if (destination.isFile()) {
@@ -40,7 +45,7 @@ public final class QuestVrRuntime {
                 }
             }
             File temporary = new File(directory, name + ".installing");
-            try (InputStream source = context.getAssets().open("quest_vr/" + name)) {
+            try (InputStream source = context.getAssets().open(prefix + name)) {
                 Files.copy(source, temporary.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
             Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -61,8 +66,17 @@ public final class QuestVrRuntime {
         }
     }
 
-    public static List<String> getClasspath(Context context) {
-        File directory = context.getDir("quest_vr", Context.MODE_PRIVATE);
+    private static File bindingDirectory(Context context, String lwjglVersion) {
+        if (!"3.3.3".equals(lwjglVersion) && !"3.4.1".equals(lwjglVersion)) {
+            throw new IllegalArgumentException("Unsupported VR LWJGL version: " + lwjglVersion);
+        }
+        File root = context.getDir("quest_vr", Context.MODE_PRIVATE);
+        return "3.4.1".equals(lwjglVersion) ? new File(root, lwjglVersion) : root;
+    }
+
+    public static List<String> getClasspath(Context context, String lwjglVersion) {
+        QuestVrFeatures.requireEnabled(context);
+        File directory = bindingDirectory(context, lwjglVersion);
         return Arrays.asList(new File(directory, JARS[0]).getAbsolutePath(),
                 new File(directory, JARS[1]).getAbsolutePath());
     }
@@ -76,10 +90,12 @@ public final class QuestVrRuntime {
         QuestVrInstanceConfig.configure(gameDirectory.toPath(), enabled, renderScalePercent, fsaaEnabled);
     }
 
-    public static void addJvmArguments(CommandBuilder command, Context context, Renderer renderer) {
+    public static void addJvmArguments(CommandBuilder command, Context context, Renderer renderer, String lwjglVersion) {
+        QuestVrFeatures.requireEnabled(context);
+        bindingDirectory(context, lwjglVersion);
         String nativeDirectory = context.getApplicationInfo().nativeLibraryDir;
         String lwjglDirectory = new File(context.getDir("runtime", Context.MODE_PRIVATE),
-                "lwjgl/3.3.3/natives/arm64-v8a").getAbsolutePath();
+                "lwjgl/" + lwjglVersion + "/natives/arm64-v8a").getAbsolutePath();
         replaceProperty(command, "org.lwjgl.opengl.libname", nativeDirectory + "/" + renderer.getGlName());
         replaceProperty(command, "org.lwjgl.opengles.libname", "/system/lib64/libGLESv3.so");
         replaceProperty(command, "org.lwjgl.egl.libname", "/system/lib64/libEGL.so");
@@ -104,6 +120,7 @@ public final class QuestVrRuntime {
             environment.remove("FCL_VR");
             return;
         }
+        QuestVrFeatures.requireEnabled(config.getContext());
         String id = config.getRenderer().getId();
         if (!Renderer.ID_QUEST_MOBILEGLUES.equals(id)) {
             throw new IllegalStateException("Unsupported Quest VR renderer: " + id);

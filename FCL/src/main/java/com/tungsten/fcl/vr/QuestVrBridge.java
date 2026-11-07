@@ -23,6 +23,7 @@ public final class QuestVrBridge {
     private QuestVrBridge() {}
 
     public static synchronized void initialize(Activity activity, String rendererId) {
+        QuestVrFeatures.requireEnabled(activity);
         if (!"quest_mobileglues".equals(rendererId)) {
             throw new IllegalArgumentException("Unsupported Quest VR renderer: " + rendererId);
         }

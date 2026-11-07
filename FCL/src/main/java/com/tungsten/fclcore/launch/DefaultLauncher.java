@@ -29,6 +29,8 @@ import com.mio.data.Renderer;
 import com.mio.plugin.MioLibPatcherManager;
 import com.mio.plugin.NativeLibPlugin;
 import com.mio.plugin.RendererPlugin;
+import com.tungsten.fcl.vr.QuestVrFeatures;
+import com.tungsten.fcl.vr.QuestVrLwjgl;
 import com.tungsten.fcl.vr.QuestVrPreferences;
 import com.tungsten.fcl.vr.QuestVrRuntime;
 import com.tungsten.fclauncher.FCLConfig;
@@ -85,6 +87,7 @@ public class DefaultLauncher {
 
     private String jnaVersion;
     private String lwjglVersion = "3.3.3";
+    private String requestedLwjglVersion = "3.3.3";
     private boolean useLwjglX = false;
     private boolean vrEnabled = false;
     private Integer vrRenderScalePercent;
@@ -101,11 +104,8 @@ public class DefaultLauncher {
     }
 
     public void setVrEnabled(boolean enabled) {
-        vrEnabled = enabled;
-        if (enabled) {
-            lwjglVersion = "3.3.3";
-            useLwjglX = false;
-        }
+        vrEnabled = QuestVrFeatures.isVrEnabled(context, enabled);
+        selectLwjglVersion(repository.getGameVersion(version).orElse(null));
     }
 
     public DefaultLauncher(Context context, GameRepository repository, Version version, AuthInfo authInfo, LaunchOptions options) {
@@ -274,7 +274,7 @@ public class DefaultLauncher {
             res.addAll(Arguments.parseArguments(argumentsFromAuthInfo.getJvm(), configuration));
 
         if (vrEnabled) {
-            QuestVrRuntime.addJvmArguments(res, context, options.getRenderer());
+            QuestVrRuntime.addJvmArguments(res, context, options.getRenderer(), lwjglVersion);
         }
 
         if (javaVersion.getVersion() != JavaVersion.JAVA_VERSION_8) {
@@ -328,7 +328,7 @@ public class DefaultLauncher {
     private void addLWJGLClassPath(Set<String> classpath) {
         Set<String> temp = new LinkedHashSet<>();
         if (vrEnabled) {
-            temp.addAll(QuestVrRuntime.getClasspath(context));
+            temp.addAll(QuestVrRuntime.getClasspath(context, lwjglVersion));
         }
         File dir = new File(FCLPath.LWJGL_DIR, lwjglVersion);
         temp.add(dir.getAbsolutePath() + "/lwjgl.jar");
@@ -461,8 +461,10 @@ public class DefaultLauncher {
 
     public FCLBridge launch() throws IOException, InterruptedException {
         String minecraft = repository.getGameVersion(version).orElse(null);
+        if (vrEnabled) QuestVrFeatures.requireEnabled(context);
+        selectLwjglVersion(minecraft);
         if (vrEnabled) {
-            QuestVrRuntime.install(context);
+            QuestVrRuntime.install(context, lwjglVersion);
         }
         QuestVrRuntime.configureInstance(repository.getRunDirectory(version.getId()), vrEnabled,
                 vrRenderScalePercent, vrFsaaEnabled);
@@ -514,12 +516,18 @@ public class DefaultLauncher {
     }
 
     public void setLwjglVersion(String lwjglVersion) {
+        requestedLwjglVersion = lwjglVersion;
+        selectLwjglVersion(repository.getGameVersion(version).orElse(null));
+    }
+
+    private void selectLwjglVersion(String minecraft) {
+        useLwjglX = false;
         if (vrEnabled) {
-            this.lwjglVersion = "3.3.3";
+            lwjglVersion = QuestVrLwjgl.defaultVersion(minecraft);
             return;
         }
         try {
-            VersionNumber v1 = VersionNumber.asVersion(lwjglVersion);
+            VersionNumber v1 = VersionNumber.asVersion(requestedLwjglVersion);
             if (v1.compareTo("3.0") < 0) {
                 useLwjglX = true;
             }

@@ -69,6 +69,7 @@ import com.tungsten.fcl.ui.main.MainUI
 import com.tungsten.fcl.ui.version.VersionListViewModel
 import com.tungsten.fcl.ui.version.Versions
 import com.tungsten.fcl.upgrade.UpdateChecker
+import com.tungsten.fcl.vr.QuestVrCompatibilityWarning
 import com.tungsten.fcl.util.LegalAgreement
 import com.tungsten.fclauncher.utils.FCLPath
 import com.tungsten.fclcore.auth.Account
@@ -340,6 +341,7 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                 setupAccountDisplay()
                 setupVersionDisplay()
                 playAnim()
+                QuestVrCompatibilityWarning.showFirstLaunch(this@MainActivity)
                 // 引导在入场动画播完后弹出；动画时长随 animationSpeed 缩放，最末组延迟 700ms。
                 // 顺序按视觉动线：右侧（账户/版本卡片/启动）→ 左侧菜单自上而下；
                 // account 步骤仅在没有账户时展示（添加过账户的用户无需引导）
@@ -349,16 +351,72 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                         activity = this@MainActivity,
                         *buildList {
                             if (Accounts.getAccounts().isEmpty()) {
-                                add(GuideStep(GuideTag.Account, account, getString(R.string.guide_account)))
+                                add(
+                                    GuideStep(
+                                        GuideTag.Account,
+                                        account,
+                                        getString(R.string.guide_account)
+                                    )
+                                )
                             }
-                            add(GuideStep(GuideTag.VersionCard, versionCard, getString(R.string.guide_version_card)))
+                            add(
+                                GuideStep(
+                                    GuideTag.VersionCard,
+                                    versionCard,
+                                    getString(R.string.guide_version_card)
+                                )
+                            )
                             add(GuideStep(GuideTag.Start, start, getString(R.string.guide_start)))
-                            add(GuideStep(GuideTag.Manage, manage, getString(R.string.guide_manage)))
-                            add(GuideStep(GuideTag.Download, download, getString(R.string.guide_download)))
-                            add(GuideStep(GuideTag.Controller, controller, getString(R.string.guide_controller)))
-                            add(GuideStep(GuideTag.Multiplayer, multiplayer, getString(R.string.guide_multiplayer)))
-                            add(GuideStep(GuideTag.Theme2, setting, getString(R.string.guide_theme2)))
-                            add(GuideStep(GuideTag.ShareLog, home, getString(R.string.guide_share_log)))
+                            add(
+                                GuideStep(
+                                    GuideTag.Manage,
+                                    manage,
+                                    getString(R.string.guide_manage)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Download,
+                                    download,
+                                    getString(R.string.guide_download)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Controller,
+                                    controller,
+                                    getString(R.string.guide_controller)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Multiplayer,
+                                    multiplayer,
+                                    getString(R.string.guide_multiplayer)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.Theme2,
+                                    setting,
+                                    getString(R.string.guide_theme2)
+                                )
+                            )
+                            add(
+                                GuideStep(
+                                    GuideTag.ShareLog,
+                                    home,
+                                    getString(R.string.guide_share_log)
+                                )
+                            )
+                            // 皮肤模型引导：关闭皮肤模型显示时视图不可见，GuideUtil 自动跳过
+                            add(
+                                GuideStep(
+                                    GuideTag.SkinModel,
+                                    UIManager.instance.mainUI.skinViewer,
+                                    getString(R.string.guide_skin_model)
+                                )
+                            )
                         }.toTypedArray()
                     )
                 }
@@ -515,7 +573,7 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
 
     /** 按当前亮暗模式加载主界面背景（Theme.getBackground 按亮暗动态返回）。
      *  ThemeEngine 的刷新回调是全局 Handler 异步排队，Activity 销毁后仍未执行的
-     *  回调无法通过 onDestroy 注销取消，这里需防 Glide 对已销毁 Activity 加载崩溃 */
+     *  回调会持有已销毁实例，这里需跳过 */
     private fun loadBackground() {
         if (isDestroyed || isFinishing) return
         ImageUtil.loadInto(
@@ -810,8 +868,15 @@ class MainActivity : FCLActivity(), OnSelectListener, View.OnClickListener {
                 VulkanEnsureResult.SUPPORTED -> doLaunchVersion(profile, versionId)
                 VulkanEnsureResult.NEED_CHECK ->
                     promptVulkanCheck(gameVersion, useCustomDriver, driver, profile, versionId)
+
                 VulkanEnsureResult.UNSUPPORTED ->
-                    runVulkanCheckAndDecide(gameVersion, useCustomDriver, driver, profile, versionId)
+                    runVulkanCheckAndDecide(
+                        gameVersion,
+                        useCustomDriver,
+                        driver,
+                        profile,
+                        versionId
+                    )
             }
         }
     }

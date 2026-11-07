@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_vr_features">VR 特性</string>
+    <string name="settings_vr_features_desc">非 Quest 设备默认关闭。开启后显示 VR 设置，对下次启动的游戏生效。</string>
+    <string name="settings_vr_compatibility_title">VR 兼容性提示</string>
+    <string name="settings_vr_compatibility_initial">当前设备未被识别为 Quest 头显，VR 特性默认隐藏并关闭。可在启动器设置中手动开启，但不保证兼容。</string>
+    <string name="settings_vr_compatibility_enable">VR 特性针对 Quest 头显开发，在当前设备上可能无法启动、黑屏或崩溃。仍要开启吗？</string>
+    <string name="settings_vr_enable_anyway">仍然开启</string>
+    <string name="settings_vr_save_failed">无法保存 VR 设置。</string>
+</resources>

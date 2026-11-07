@@ -10,7 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.SeekBar
 import androidx.recyclerview.widget.RecyclerView
-import com.mio.manager.RendererManager.getRenderer
+import com.mio.manager.RendererManager.getRendererForMode
 import com.mio.util.pixelAwareIcon
 import com.tungsten.fcl.R
 import com.tungsten.fcl.databinding.ItemVersionSettingEditBinding
@@ -22,6 +22,7 @@ import com.tungsten.fcl.game.FCLGameRepository
 import com.tungsten.fcl.setting.Controllers
 import com.tungsten.fcl.setting.VersionSetting
 import com.tungsten.fcl.vr.QuestVrGraphicsSettings
+import com.tungsten.fcl.vr.QuestVrFeatures
 import com.tungsten.fcl.ui.setting.SettingGroup
 import com.tungsten.fclcore.util.platform.MemoryUtils
 import com.tungsten.fcllibrary.component.theme.ThemeEngine
@@ -124,6 +125,24 @@ class VersionSettingAdapter(
         notifyDataSetChanged()
     }
 
+    /**
+     * 「使用系统 Vulkan 驱动」开关切换后的局部刷新。
+     * 该开关只控制下方自定义驱动行的显隐：全量 rebuild 会把开关行一并重绑，
+     * 而 RecyclerView 复用重绑发生在 detach 状态下，setChecked 会取消用户点按
+     * 触发的滑块动画，表现为开关无动画直接跳变。这里仅插入/移除驱动行，
+     * 开关行保留原视图，动画正常播放。
+     */
+    fun updateVulkanDriverRow() {
+        val newRows = buildRows()
+        val oldIndex = rows.indexOfFirst { it is Row.ValueRow && it.editTag == VersionSettingTag.EDIT_DRIVER }
+        val newIndex = newRows.indexOfFirst { it is Row.ValueRow && it.editTag == VersionSettingTag.EDIT_DRIVER }
+        rows = newRows
+        when {
+            oldIndex >= 0 && newIndex < 0 -> notifyItemRemoved(oldIndex)
+            oldIndex < 0 && newIndex >= 0 -> notifyItemInserted(newIndex)
+        }
+    }
+
     /** 对话框修改属性后局部刷新对应行（行未显示时下次 bind 自然读到新值） */
     fun refreshRow(tag: VersionSettingTag) {
         val index = rows.indexOfFirst { it.rowTag == tag }
@@ -139,17 +158,17 @@ class VersionSettingAdapter(
 
     private fun buildRows(): List<Row> {
         val result = mutableListOf<Row>()
+        val vrEnabled = !globalSetting && QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)
         if (!globalSetting) {
             result += Row.SwitchRow(
                 labelRes = R.string.settings_type_special_enable,
                 value = { enableSpecific },
                 onToggle = { listener.onSpecialSwitch(VersionSettingTag.SPECIAL, it) },
-                disabled = modpack,
                 rowTag = VersionSettingTag.SPECIAL,
                 descriptionRes = R.string.settings_type_special_enable_desc,
             )
             result += Row.IconRow(R.string.settings_icon_desc)
-            result += Row.SwitchRow(
+            if (QuestVrFeatures.isEnabled(context)) result += Row.SwitchRow(
                 labelRes = R.string.settings_vr_enable,
                 value = { versionSetting.isVrEnabled },
                 onToggle = { listener.onSpecialSwitch(VersionSettingTag.VR, it) },
@@ -157,7 +176,7 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_vr_enable_desc,
                 group = SettingGroup.Render
             )
-            if (versionSetting.isVrEnabled) {
+            if (vrEnabled) {
                 result += Row.ValueRow(
                     R.string.settings_vr_render_scale,
                     { vrRenderScalePercent()?.let { "$it%" }
@@ -171,7 +190,7 @@ class VersionSettingAdapter(
                 result += Row.SwitchRow(
                     R.string.settings_vr_fsaa,
                     { versionSetting.vrFsaaEnabled ?: vrGraphicsSettings?.isFsaaEnabled ?: false },
-                    { versionSetting.vrFsaaEnabled = it },
+                    { if (QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)) versionSetting.vrFsaaEnabled = it },
                     disabled = versionSetting.vrFsaaEnabled == null && vrGraphicsSettings == null,
                     rowTag = VersionSettingTag.VR_FSAA,
                     descriptionRes = R.string.settings_vr_fsaa_desc,
@@ -180,7 +199,7 @@ class VersionSettingAdapter(
                 result += Row.SwitchRow(
                     R.string.settings_vr_stereo_sync,
                     { versionSetting.vrStereoSyncEnabled },
-                    { versionSetting.vrStereoSyncEnabled = it },
+                    { if (QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)) versionSetting.vrStereoSyncEnabled = it },
                     rowTag = VersionSettingTag.VR_STEREO_SYNC,
                     descriptionRes = R.string.settings_vr_stereo_sync_desc,
                     group = SettingGroup.Render,
@@ -198,7 +217,9 @@ class VersionSettingAdapter(
             )
             result += Row.SwitchRow(
                 R.string.settings_game_working_directory,
-                { versionSetting.isIsolateGameDir },
+                // 整合包版本的游戏目录由 getGameDirectoryType 强制为版本目录，
+                // 开关无效故保持禁用；但展示值须恒为开，避免使用全局设置时读到全局值造成误导
+                { modpack || versionSetting.isIsolateGameDir },
                 { versionSetting.isIsolateGameDir = it },
                 disabled = modpack,
                 descriptionRes = R.string.settings_game_working_directory_desc,
@@ -221,7 +242,7 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_fcl_controller_desc,
                 group = SettingGroup.Common
             )
-            if (!versionSetting.isVrEnabled) result += Row.ValueRow(
+            if (!vrEnabled) result += Row.ValueRow(
                 R.string.settings_fcl_graphics_backend,
                 { versionSetting.graphicsBackend },
                 VersionSettingTag.EDIT_BACKEND,
@@ -233,11 +254,11 @@ class VersionSettingAdapter(
                 R.string.settings_fcl_renderer,
                 { rendererText() },
                 VersionSettingTag.EDIT_RENDERER,
-                if (versionSetting.isVrEnabled) null else VersionSettingTag.INSTALL_RENDERER,
+                if (vrEnabled) null else VersionSettingTag.INSTALL_RENDERER,
                 descriptionRes = R.string.settings_fcl_renderer_desc,
                 group = SettingGroup.Render,
             )
-            if (!versionSetting.isVrEnabled) {
+            if (!vrEnabled) {
                 result += Row.SwitchRow(
                     R.string.settings_fcl_vulkan_driver_system,
                     { versionSetting.isVKDriverSystem },
@@ -277,6 +298,13 @@ class VersionSettingAdapter(
                 { versionSetting.isNotCheckGame },
                 { versionSetting.isNotCheckGame = it },
                 descriptionRes = R.string.settings_advanced_dont_check_game_completeness_desc,
+                group = SettingGroup.Check
+            )
+            result += Row.SwitchRow(
+                R.string.settings_advanced_dont_restore_modpack,
+                { versionSetting.isNotRestoreModpack },
+                { versionSetting.isNotRestoreModpack = it },
+                descriptionRes = R.string.settings_advanced_dont_restore_modpack_desc,
                 group = SettingGroup.Check
             )
             result += Row.SwitchRow(
@@ -458,7 +486,10 @@ class VersionSettingAdapter(
         binding.switchView.text = context.getString(row.labelRes)
         binding.switchView.isEnabled = !row.disabled
         binding.switchView.setOnCheckedChangeListener(null)
-        binding.switchView.isChecked = row.value()
+        // 复用重绑时状态一致则跳过 setChecked：detach 状态下它走取消动画的吸附分支
+        if (binding.switchView.isChecked != row.value()) {
+            binding.switchView.isChecked = row.value()
+        }
         binding.switchView.setOnCheckedChangeListener { _, checked -> row.onToggle(checked) }
         binding.switchView.setOnLongClickListener(
             if (row.longClick) View.OnLongClickListener {
@@ -583,5 +614,10 @@ class VersionSettingAdapter(
         else "Default"
 
 
-    private fun rendererText(): String = getRenderer(versionSetting.renderer).des
+    private fun rendererText(): String {
+        val vrEnabled = !globalSetting && QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)
+        val rendererId = if (!globalSetting && versionSetting.isVrEnabled && !vrEnabled)
+            versionSetting.nonVrRenderer else versionSetting.renderer
+        return getRendererForMode(rendererId, vrEnabled).des
+    }
 }

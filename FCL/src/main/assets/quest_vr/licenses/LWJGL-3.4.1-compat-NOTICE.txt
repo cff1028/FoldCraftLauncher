@@ -1,0 +1,12 @@
+FCL Quest VR LWJGL 3.4.1 compatibility bindings, modified 2026-11-07.
+Copyright (c) 2012-present Lightweight Java Game Library and contributors.
+BSD 3-Clause: see LWJGL-LICENSE.md and QuestCraft-LWJGL-LICENSE.md.
+
+Based on QuestCraftPlusPlus/lwjgl3 ec0bbebe4379f59fe956c9a79e44d3b09837b134
+(OpenXR, including Android extensions) and LWJGL OpenGL ES 3.3.3 sources.
+Adapted Callback.Descriptor, absolute scalar memory operations, and
+StructBuffer view factories for the packaged LWJGL 3.4.1 core.
+Original Android OpenXR APIs and GLES JNI signatures are retained.
+These are FCL compatibility builds, not official LWJGL 3.4.1 modules.
+Corresponding source and rebuild script: third-party/quest-vr/lwjgl341-compat
+in the FCL Quest VR source distribution.

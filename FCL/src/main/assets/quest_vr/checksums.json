@@ -1,5 +1,15 @@
 [
   {
+    "file": "3.4.1/lwjgl-opengles.jar",
+    "bytes": 331849,
+    "sha256": "abec5c36f2832c6bb80259c2524d2e3e653072f48db160d4da718420e920e0e3"
+  },
+  {
+    "file": "3.4.1/lwjgl-openxr.jar",
+    "bytes": 1483490,
+    "sha256": "52e8e0845d4e1c09385fc42822112fd201b557d07957109953ef778fc5c6413a"
+  },
+  {
     "file": "lwjgl-opengles.jar",
     "bytes": 369765,
     "sha256": "a9f291d329d8bb7206985230b850efde516492c43b3871a6d28b82c0b7810d3e"

@@ -22,6 +22,7 @@ import com.tungsten.fcl.game.OAuthServer
 import com.tungsten.fcl.setting.ConfigHolder
 import com.tungsten.fcl.setting.DownloadProviders
 import com.tungsten.fcl.vr.QuestVrPreferences
+import com.tungsten.fcl.vr.QuestVrFeatures
 import com.tungsten.fcllibrary.component.theme.ThemeEngine
 import com.tungsten.fcllibrary.component.view.FCLButton
 import com.tungsten.fcllibrary.component.view.FCLImageButton
@@ -62,6 +63,7 @@ enum class LauncherSettingTag {
 
     // 开关行
     SWITCH_AUTO_EXIT,
+    SWITCH_QUEST_VR_FEATURES,
     SWITCH_QUEST_VR_TRANSITION_ANIMATION,
     SWITCH_HIGH_GAME_THREAD_PRIORITY,
     SWITCH_IGNORE_NOTCH,
@@ -145,7 +147,7 @@ class LauncherSettingAdapter(
             context.getString(R.string.settings_launcher_theme_mode_light),
             context.getString(R.string.settings_launcher_theme_mode_dark)
         )
-        return listOf(
+        return listOfNotNull(
             Row.SpinnerRow(
                 R.string.settings_launcher_language, languageList,
                 LocaleUtils.getLanguage(context), LauncherSettingTag.SPINNER_LANGUAGE,
@@ -180,12 +182,18 @@ class LauncherSettingAdapter(
                 LauncherSettingTag.SWITCH_AUTO_EXIT,
                 R.string.settings_launcher_exit_after_launching_desc,
             ),
-            Row.SwitchRow(
+            if (!QuestVrFeatures.isQuestDevice()) Row.SwitchRow(
+                R.string.settings_vr_features,
+                { QuestVrFeatures.isEnabled(context) },
+                LauncherSettingTag.SWITCH_QUEST_VR_FEATURES,
+                R.string.settings_vr_features_desc,
+            ) else null,
+            if (QuestVrFeatures.isEnabled(context)) Row.SwitchRow(
                 R.string.settings_quest_vr_transition_animation,
                 { QuestVrPreferences.isTransitionAnimationEnabled(context) },
                 LauncherSettingTag.SWITCH_QUEST_VR_TRANSITION_ANIMATION,
                 R.string.settings_quest_vr_transition_animation_desc,
-            ),
+            ) else null,
             Row.SwitchRow(
                 R.string.settings_high_game_thread_priority,
                 { QuestVrPreferences.isHighGameThreadPriorityEnabled(context) },

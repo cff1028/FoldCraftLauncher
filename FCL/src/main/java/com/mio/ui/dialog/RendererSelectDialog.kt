@@ -14,6 +14,7 @@ import com.tungsten.fcl.R
 import com.tungsten.fcl.databinding.DialogRendererSelectBinding
 import com.tungsten.fcl.setting.Profiles
 import com.tungsten.fcl.setting.VersionSetting
+import com.tungsten.fcl.vr.QuestVrFeatures
 import com.tungsten.fcllibrary.component.dialog.FCLDialog
 import com.tungsten.fcllibrary.util.ConvertUtils
 import java.util.function.Consumer
@@ -41,8 +42,10 @@ class RendererSelectDialog(
         val versionSetting = explicitVersionSetting
             ?: if (isGlobal) Profiles.getSelectedProfile().globalVersionSetting
             else Profiles.getSelectedProfile().versionSetting
-        val vrEnabled = !isGlobal && versionSetting.isVrEnabled
-        val currentId = RendererManager.getRendererForMode(versionSetting.renderer, vrEnabled).id
+        val vrEnabled = !isGlobal && QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)
+        val editNonVrRenderer = !isGlobal && versionSetting.isVrEnabled && !vrEnabled
+        val rendererId = if (editNonVrRenderer) versionSetting.nonVrRenderer else versionSetting.renderer
+        val currentId = RendererManager.getRendererForMode(rendererId, vrEnabled).id
         val availableRenderers = RendererManager.getRenderersForMode(vrEnabled).toMutableList()
         val configCallback: (Renderer) -> Unit = { renderer ->
             val specs = RendererPlugin.builtinEnvSpecs(context, renderer.id)
@@ -58,9 +61,14 @@ class RendererSelectDialog(
             currentId,
             configCallback
         ) { renderer ->
-            versionSetting.renderer = renderer.id
-            dismiss()
-            callback.accept(renderer.des)
+            if (vrEnabled && !QuestVrFeatures.isEnabled(context)) {
+                dismiss()
+            } else {
+                if (editNonVrRenderer) versionSetting.nonVrRenderer = renderer.id
+                else versionSetting.renderer = renderer.id
+                dismiss()
+                callback.accept(renderer.des)
+            }
         }
         binding.recyclerView.layoutManager = LinearLayoutManager(context)
         binding.recyclerView.addItemDecoration(

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_vr_features">VR features</string>
+    <string name="settings_vr_features_desc">Disabled by default on non-Quest devices. Enable to show VR settings. Applies to the next game launch.</string>
+    <string name="settings_vr_compatibility_title">VR compatibility</string>
+    <string name="settings_vr_compatibility_initial">This device is not recognized as a Quest headset. VR features are hidden and disabled by default. You can enable them in launcher settings, but compatibility is not guaranteed.</string>
+    <string name="settings_vr_compatibility_enable">VR features are designed for Quest headsets. On this device, VR may fail to start, show a black screen or crash. Enable anyway?</string>
+    <string name="settings_vr_enable_anyway">Enable anyway</string>
+    <string name="settings_vr_save_failed">Could not save the VR setting.</string>
+</resources>

@@ -79,6 +79,7 @@ public final class QuestGameBootstrap {
     }
 
     public static boolean resumeRunningGame(Context context) {
+        if (!QuestVrFeatures.isEnabled(context)) return false;
         int pid = runningGamePid(context);
         if (pid == -1 || isReturning(context, pid)) return false;
         context.startActivity(new Intent(context, QuestVrLoadingActivity.class)
@@ -91,6 +92,11 @@ public final class QuestGameBootstrap {
         handler.post(new Runnable() {
             private int remaining = 160;
             @Override public void run() {
+                if (!QuestVrFeatures.isEnabled(context)) {
+                    discardLaunch(context, intent);
+                    failure.accept(new IOException("VR features are disabled on this device"));
+                    return;
+                }
                 int pid = runningGamePid(context);
                 if (pid != -1 && isReturning(context, pid) && remaining-- > 0) {
                     handler.postDelayed(this, 100);
@@ -111,6 +117,7 @@ public final class QuestGameBootstrap {
 
     public static void attachLaunch(Context context, Intent intent, FCLBridge bridge,
                                     boolean useInputStack) throws IOException {
+        if (!QuestVrFeatures.isEnabled(context)) throw new IOException("VR features are disabled on this device");
         FCLConfig config = bridge.getLaunchConfig();
         if (config == null || !config.isVrEnabled()) throw new IOException("Missing VR launch configuration");
         Launch launch = new Launch();
@@ -157,6 +164,11 @@ public final class QuestGameBootstrap {
     }
 
     public static FCLBridge restore(Activity activity, Intent intent) throws IOException {
+        if (!QuestVrFeatures.isEnabled(activity)) {
+            discardLaunch(activity, intent);
+            intent.removeExtra(EXTRA_TOKEN);
+            throw new IOException("VR features are disabled on this device");
+        }
         if (!isGameProcess()) throw new IOException("VR must run in its isolated game process");
         FCLBridge existing = JVMActivity.getPreparedBridge();
         if (existing != null && gameProcess) {

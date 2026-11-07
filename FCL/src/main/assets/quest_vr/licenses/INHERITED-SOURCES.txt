@@ -1,7 +1,7 @@
 Inherited components and source locations
 
-The unmodified runtime binaries and libraries originate from FCL main
-52eb2b3aa51e677bc0382431e8788cc65ff43fc3. Original notices, bundled JRE legal
+The unmodified runtime binaries and libraries are retained from FCL 1.3.4.5
+(b08db5e96a57bc74ae536fee337b32aa9c9ea156). Original notices, bundled JRE legal
 files and upstream source headers are retained. Source/build projects:
 
 OpenJDK (GPL-2.0 with Classpath Exception), Java 8/17/21/25:

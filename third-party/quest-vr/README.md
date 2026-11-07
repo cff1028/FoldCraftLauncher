@@ -1,15 +1,16 @@
 # Quest VR components
 
 This fork adds Quest VR support to Fold Craft Launcher. Changes by cff1028,
-2026-10-31 to 2026-11-06: per-instance VR settings, Android/OpenXR lifecycle and presentation,
+2026-10-31 to 2026-11-07: per-instance VR settings, Android/OpenXR lifecycle and presentation,
 Vivecraft installation checks, MobileGlues compatibility fixes, Quest CPU/GPU scheduling,
-and per-instance GPU completion synchronization before OpenXR image release.
+per-instance GPU completion synchronization before OpenXR image release,
+and explicit VR feature opt-in on non-Quest devices.
 FCL retains its GPL-3.0 license and upstream copyright notices.
 
 | Component | Source | License |
 | --- | --- | --- |
 | MobileGlues 2.0.1 Dev1 + compatibility fixes | [fcdf914](https://github.com/MobileGL-Dev/MobileGlues/tree/fcdf91456c1b3b5e77e5264cffe682595c13113f); patch/build scripts in `mobileglues-fix` | LGPL-2.1-only |
-| SimpleFPEWrapper (ordinary mode) | [ca8c6af26ca2](https://github.com/MobileGL-Dev/SimpleFPEWrapper/tree/ca8c6af26ca2996c3d07be90cde0e72ebf815935); submodules pinned in `SimpleFPEWrapper-source.json` | LGPL-3.0 |
+| SimpleFPEWrapper (ordinary mode) | [3042d8a87b4d](https://github.com/MobileGL-Dev/SimpleFPEWrapper/tree/3042d8a87b4d0952c705de35d13b262a3ae0f5a2); submodules pinned in `SimpleFPEWrapper-source.json` | LGPL-3.0 |
 | OpenXR loader/headers | [Pojlib 207b765b](https://github.com/QuestCraftPlusPlus/Pojlib/tree/207b765b31d112367e5639b0f1d96902fac8ccc0), Khronos OpenXR | Apache-2.0 |
 | LWJGL OpenGLES/OpenXR bindings | See `JAVA-BINDINGS.md`; native OpenGLES from the same Pojlib revision | BSD-3-Clause |
 | Pojlib JNI interface reference | Same Pojlib revision | LGPL-3.0 |

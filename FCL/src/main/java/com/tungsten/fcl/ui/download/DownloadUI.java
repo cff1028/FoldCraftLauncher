@@ -267,6 +267,12 @@ public class DownloadUI extends FCLCommonUI {
         }
     }
 
+    public void dismissTempPage(FCLPage page) {
+        int index = tempPageStack.indexOf(page);
+        if (index < 0) return;
+        while (tempPageStack.size() > index) dismissCurrentTempPage();
+    }
+
     @Override
     public void onBackPressed() {
         if (canReturn()) {

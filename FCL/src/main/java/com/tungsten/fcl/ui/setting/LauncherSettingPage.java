@@ -32,6 +32,8 @@ import com.tungsten.fcl.databinding.PageSettingListBinding;
 import com.tungsten.fcl.setting.DownloadSource;
 import com.tungsten.fcl.upgrade.UpdateChecker;
 import com.tungsten.fcl.vr.QuestVrPreferences;
+import com.tungsten.fcl.vr.QuestVrFeatures;
+import com.tungsten.fcl.vr.QuestVrCompatibilityWarning;
 import com.tungsten.fclcore.mod.RemoteModCache;
 import com.tungsten.fclauncher.utils.FCLPath;
 import com.tungsten.fclcore.task.FetchTask;
@@ -64,6 +66,7 @@ import java.util.logging.Level;
 public class LauncherSettingPage extends FCLPage implements LauncherSettingAdapter.Listener {
 
     private SharedPreferences sharedPreferences;
+    private LauncherSettingAdapter adapter;
 
     public LauncherSettingPage(Context context, int id) {
         super(context, id, R.layout.page_setting_list);
@@ -74,7 +77,7 @@ public class LauncherSettingPage extends FCLPage implements LauncherSettingAdapt
         super.onCreate();
         sharedPreferences = getActivity().getSharedPreferences("launcher", MODE_PRIVATE);
         PageSettingListBinding binding = PageSettingListBinding.bind(getContentView());
-        LauncherSettingAdapter adapter = new LauncherSettingAdapter(getContext(), this);
+        adapter = new LauncherSettingAdapter(getContext(), this);
         binding.settingList.setLayoutManager(new LinearLayoutManager(getContext()));
         // 行间用间距分隔（ItemDecoration），最后一行不加；同组相邻行留 1dp 缝并绘制次要色分割线
         int rowSpacing = (int) (8 * getContext().getResources().getDisplayMetrics().density);
@@ -416,6 +419,18 @@ public class LauncherSettingPage extends FCLPage implements LauncherSettingAdapt
         switch (tag) {
             case SWITCH_AUTO_EXIT:
                 sharedPreferences.edit().putBoolean("autoExitLauncher", checked).apply();
+                break;
+            case SWITCH_QUEST_VR_FEATURES:
+                if (QuestVrFeatures.isQuestDevice()) break;
+                if (checked) {
+                    adapter.rebuild();
+                    QuestVrCompatibilityWarning.confirmEnable(getActivity(), adapter::rebuild);
+                } else {
+                    if (!QuestVrFeatures.setEnabled(getContext(), false)) {
+                        Toast.makeText(getContext(), R.string.settings_vr_save_failed, Toast.LENGTH_SHORT).show();
+                    }
+                    adapter.rebuild();
+                }
                 break;
             case SWITCH_QUEST_VR_TRANSITION_ANIMATION:
                 QuestVrPreferences.setTransitionAnimationEnabled(getContext(), checked);

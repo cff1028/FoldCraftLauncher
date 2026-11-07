@@ -134,6 +134,16 @@ class VersionSetting : Cloneable {
             changed()
         }
 
+    /**
+     * True if FCL does not restore missing modpack files (including mods) at launch.
+     */
+    var isNotRestoreModpack: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            changed()
+        }
+
     // Minecraft settings.
     /**
      * The server ip that will be entered after Minecraft successfully loaded.
@@ -290,6 +300,7 @@ class VersionSetting : Cloneable {
             it.javaArgs = javaArgs
             it.minecraftArgs = minecraftArgs
             it.isNotCheckGame = isNotCheckGame
+            it.isNotRestoreModpack = isNotRestoreModpack
             it.isNotCheckJVM = isNotCheckJVM
             it.serverIp = serverIp
             it.isIsolateGameDir = isIsolateGameDir
@@ -329,6 +340,7 @@ class VersionSetting : Cloneable {
                 addProperty("serverIp", src.serverIp)
                 addProperty("java", src.java)
                 addProperty("notCheckGame", src.isNotCheckGame)
+                addProperty("notRestoreModpack", src.isNotRestoreModpack)
                 addProperty("notCheckJVM", src.isNotCheckJVM)
                 addProperty("graphicsBackend", src.graphicsBackend)
                 addProperty("vulkanDriverSystem", src.isVKDriverSystem)
@@ -372,6 +384,7 @@ class VersionSetting : Cloneable {
                     JavaManager.javaList.find { it.name == json["java"]?.asString }?.name
                         ?: "Auto"
                 vs.isNotCheckGame = json["notCheckGame"]?.asBoolean ?: false
+                vs.isNotRestoreModpack = json["notRestoreModpack"]?.asBoolean ?: false
                 vs.isNotCheckJVM = json["notCheckJVM"]?.asBoolean ?: false
                 vs.graphicsBackend = json["graphicsBackend"]?.asString ?: "default"
                 vs.isVKDriverSystem = json["vulkanDriverSystem"]?.asBoolean ?: false

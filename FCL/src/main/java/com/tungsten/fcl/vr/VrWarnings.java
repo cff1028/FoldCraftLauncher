@@ -30,8 +30,8 @@ public final class VrWarnings {
         };
     }
 
-    public static void show(Context context, VivecraftInspector.Status status,
-                            QuestVivecraftTarget target, Runnable onDismiss) {
+    public static FCLAlertDialog show(Context context, VivecraftInspector.Status status,
+                                     QuestVivecraftTarget target, Runnable onDismiss) {
         boolean[] browseRequested = {false};
         FCLAlertDialog dialog = new FCLAlertDialog.Builder(context)
                 .setAlertLevel(FCLAlertDialog.AlertLevel.ALERT)
@@ -50,6 +50,7 @@ public final class VrWarnings {
             }
         });
         dialog.show();
+        return dialog;
     }
 
     private static void stackWarningButtons(FCLAlertDialog dialog) {

@@ -64,6 +64,7 @@ public final class QuestVrSession implements FCLBridgeCallback {
     }
 
     public static QuestVrSession prepare(QuestVrLoadingActivity activity, FCLBridge bridge) {
+        QuestVrFeatures.requireEnabled(activity);
         if (current == null) {
             current = new QuestVrSession(activity, bridge);
             QuestVrBridge.initialize(activity, bridge.getVrRendererId());

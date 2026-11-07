@@ -18,6 +18,7 @@ import com.tungsten.fcl.activity.MainActivity;
 import com.tungsten.fcl.ui.UIManager;
 import com.tungsten.fcl.vr.QuestVivecraftService;
 import com.tungsten.fcl.vr.QuestVivecraftTarget;
+import com.tungsten.fcl.vr.QuestVrFeatures;
 import com.tungsten.fclcore.task.Schedulers;
 import com.tungsten.fclcore.util.Logging;
 import com.tungsten.fcllibrary.component.dialog.FCLAlertDialog;
@@ -51,7 +52,8 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
 
     public static void open(QuestVivecraftTarget target) {
         MainActivity activity = MainActivity.getInstance();
-        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()
+                || !QuestVrFeatures.isEnabled(activity)) return;
         activity.refreshMenuView(null);
         activity.binding.download.setSelected(true);
         DownloadUI ui = UIManager.getInstance().getDownloadUI();
@@ -96,6 +98,12 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
         findViewById(R.id.qv_back).setOnClickListener(v -> UIManager.getInstance().getDownloadUI().dismissCurrentTempPage());
         getContentView().addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) {
+                if (!QuestVrFeatures.isEnabled(getContext())) {
+                    v.setVisibility(View.GONE);
+                    v.post(() -> UIManager.getInstance().getDownloadUI()
+                            .dismissTempPage(QuestVivecraftDownloadPage.this));
+                    return;
+                }
                 boolean returning = detached;
                 detached = false;
                 if (returning && !busy) load();
@@ -119,7 +127,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     }
 
     private void load() {
-        if (busy || detached) return;
+        if (busy || detached || !QuestVrFeatures.isEnabled(getContext())) return;
         releases.clear();
         adapter.notifyDataSetChanged();
         if (target.loader == QuestVivecraftTarget.Loader.NONE || target.minecraftVersion.isEmpty()
@@ -144,7 +152,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
         }).whenCompleteAsync((listing, error) -> {
             if (getActivity().isDestroyed() || operation != cancellation) return;
             setBusy(false);
-            if (detached || source != requestedSource) return;
+            if (detached || source != requestedSource || !QuestVrFeatures.isEnabled(getContext())) return;
             if (error != null) {
                 showError(error);
                 return;
@@ -167,7 +175,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     }
 
     private void confirmInstall(QuestVivecraftService.ReleaseAsset asset) {
-        if (busy || detached || asset.source != source) return;
+        if (busy || detached || asset.source != source || !QuestVrFeatures.isEnabled(getContext())) return;
         new FCLAlertDialog.Builder(getContext())
                 .setTitle(getContext().getString(R.string.qv_download_install_title))
                 .setMessage(getContext().getString(R.string.qv_download_install_prompt,
@@ -178,7 +186,7 @@ public final class QuestVivecraftDownloadPage extends FCLPage {
     }
 
     private void install(QuestVivecraftService.ReleaseAsset asset) {
-        if (busy || detached || asset.source != source) return;
+        if (busy || detached || asset.source != source || !QuestVrFeatures.isEnabled(getContext())) return;
         cancellation = new QuestVivecraftService.Cancellation();
         QuestVivecraftService.Cancellation operation = cancellation;
         setBusy(true);
