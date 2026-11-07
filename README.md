@@ -1,10 +1,10 @@
 ## Quest VR 分支
 
-基于 [FCL 1.3.4.5](https://github.com/FCL-Team/FoldCraftLauncher/releases/tag/1.3.4.5) 的 Quest 3 / ARM64 分支，包名 `com.questfcl.launcher`，可与原版共存。
+FCL Quest VR **0.1.1**，基于 [FCL 1.3.4.5](https://github.com/FCL-Team/FoldCraftLauncher/releases/tag/1.3.4.5)，面向 Quest 3 / ARM64。包名 `com.questfcl.launcher`，可与原版共存。
 
 - 每个实例独立开启 Quest VR，支持渲染比例、FSAA、双眼同步和游戏内 VR / 平面切换。双眼同步默认开启，用于改善重载光影抖动。
 - 集成 MobileGlues 2.0.1 Dev1 与 26.3 兼容修复；Vivecraft 下载可选择 QuestCraft 或 cff1028 来源。公开版不含 LTW。
-- Minecraft 26.1 及以上的 VR 模式默认使用 LWJGL 3.4.1。非 Quest 设备默认隐藏并关闭 VR，可在启动器设置中手动开启。
+- Minecraft 26.1 及以上的 VR 模式默认使用 LWJGL 3.4.1。非 Quest 设备默认隐藏并关闭 VR，首次启动提示兼容性；可在启动器设置中手动开启，每次重新开启均需确认。
 - [下载](https://github.com/cff1028/FoldCraftLauncher/releases) · [构建说明](BUILDING.txt) · [依赖许可与源码](third-party/quest-vr/README.md)
 
 本分支由 cff1028 维护；以下为上游项目介绍与致谢。

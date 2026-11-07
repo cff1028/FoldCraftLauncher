@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="quest_vr_preview_updates">FCL Quest VR 是独立预览版本。请安装本项目提供的新版 APK 以保留 VR 功能。</string>
+    <string name="quest_vr_preview_updates">FCL Quest VR 是独立分支。请安装本项目提供的新版 APK 以保留 VR 功能。</string>
 </resources>

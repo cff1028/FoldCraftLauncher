@@ -1,7 +1,7 @@
 FCL Quest VR — build and relink
 
 Source: https://github.com/cff1028/FoldCraftLauncher
-Local release: 0.1.1; package com.questfcl.launcher; VersionCode 21.
+Release: 0.1.1; package com.questfcl.launcher; VersionCode 21.
 Merged upstream FCL 1.3.4.5 (b08db5e96a57bc74ae536fee337b32aa9c9ea156).
 
 VR uses LWJGL 3.4.1 for Minecraft 26.1 and later, and 3.3.3 for older versions.
