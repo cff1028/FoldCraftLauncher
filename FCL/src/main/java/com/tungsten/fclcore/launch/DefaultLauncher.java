@@ -90,6 +90,7 @@ public class DefaultLauncher {
     private String requestedLwjglVersion = "3.3.3";
     private boolean useLwjglX = false;
     private boolean vrEnabled = false;
+    private boolean vrVulkanEnabled = false;
     private Integer vrRenderScalePercent;
     private Boolean vrFsaaEnabled;
     private boolean vrStereoSyncEnabled = true;
@@ -104,8 +105,14 @@ public class DefaultLauncher {
     }
 
     public void setVrEnabled(boolean enabled) {
+        setVrEnabled(enabled, "opengl");
+    }
+
+    public void setVrEnabled(boolean enabled, String graphicsBackend) {
         vrEnabled = QuestVrFeatures.isVrEnabled(context, enabled);
-        selectLwjglVersion(repository.getGameVersion(version).orElse(null));
+        String minecraft = repository.getGameVersion(version).orElse(null);
+        vrVulkanEnabled = vrEnabled && "vulkan".equals(graphicsBackend) && QuestVrRuntime.supportsVulkan(minecraft);
+        selectLwjglVersion(minecraft);
     }
 
     public DefaultLauncher(Context context, GameRepository repository, Version version, AuthInfo authInfo, LaunchOptions options) {
@@ -493,6 +500,7 @@ public class DefaultLauncher {
                 renderer,
                 finalArgs
         );
+        config.setMinecraftVersion(minecraft);
         config.setUseVKDriverSystem(options.isVKDriverSystem());
         config.setSfpewLayerEnabled(!vrEnabled && RendererPlugin.isSfpewLayerEnabled(renderer, minecraft));
         config.setInstalledModLoaders(new FCLConfig.InstalledModLoaders(
@@ -506,6 +514,7 @@ public class DefaultLauncher {
         ));
         config.setLwjglVersion(lwjglVersion);
         config.setVrEnabled(vrEnabled);
+        config.setVrVulkanEnabled(vrVulkanEnabled);
         config.setVrStereoSyncEnabled(vrStereoSyncEnabled);
         config.setHighGameThreadPriority(QuestVrPreferences.isHighGameThreadPriorityEnabled(context));
         return FCLauncher.launchMinecraft(config);

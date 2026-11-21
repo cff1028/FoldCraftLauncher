@@ -1,22 +1,28 @@
 --- a/MobileGlues-cpp/CMakeLists.txt
 +++ b/MobileGlues-cpp/CMakeLists.txt
 @@ -1,3 +1,4 @@
-+# Modified for FCL Quest VR on 2026-11-06: build shared shader-default tracking.
++# Modified for FCL Quest VR on 2026-11-13: shader defaults, depth uploads and optional diagnostics.
  cmake_minimum_required(VERSION 3.22.1)
  project("mobileglues")
  enable_language(CXX)
-@@ -96,6 +97,7 @@
+@@ -96,8 +97,13 @@
      gl/log.cpp
      gl/program.cpp
      gl/shader.cpp
 +    gl/shader_defaults.cpp
++    gl/backend_diagnostics.cpp
++    gl/vrm_diagnostics.cpp
      gl/framebuffer.cpp
      gl/texture.cpp
++    gl/srgb_mipmap.cpp
++    gl/depth_upload.cpp
      gl/drawing.cpp
+     gl/multidraw.cpp
+     bench/multidraw_bench.cpp
 --- a/MobileGlues-cpp/egl/context.h
 +++ b/MobileGlues-cpp/egl/context.h
 @@ -1,3 +1,4 @@
-+// Modified for FCL Quest VR on 2026-11-06: context errors and shared shader-default state.
++// Modified for FCL Quest VR on 2026-11-13: context-scoped diagnostic errors.
  // MobileGlues - egl/context.h
  // Copyright (c) 2025-2026 MobileGL-Dev
  // Licensed under the GNU Lesser General Public License v2.1:
@@ -31,7 +37,7 @@
      unsigned long long id;
      // Objects GL shares across a share group -- buffers, textures, renderbuffers,
      // samplers, shaders, programs, syncs -- belong here. They are still
-@@ -60,6 +64,10 @@
+@@ -60,6 +64,12 @@
      EGLSurface read;
      int current_count;     // how many threads have this current
      bool destroy_pending;  // eglDestroyContext was called while still current
@@ -39,17 +45,1547 @@
 +    // context, so moving a context to another thread preserves its error and
 +    // switching contexts on one thread does not leak it into an unrelated one.
 +    GLenum shader_source_error = GL_NO_ERROR;
++    GLenum frontend_error = GL_NO_ERROR;
++    GLbitfield preserved_backend_errors = 0;
  };
  
  // The context current on THIS thread, or nullptr. EGL scopes the current context
+--- /dev/null
++++ b/MobileGlues-cpp/gl/backend_diagnostics.cpp
+@@ -0,0 +1,319 @@
++// Modified for FCL Quest VR on 2026-11-13: strict error diagnostics take precedence.
++// Copyright (c) 2026 FCL Quest contributors
++// SPDX-License-Identifier: LGPL-2.1-only
++#include "backend_diagnostics.h"
++#include "log.h"
++#include "../gles/loader.h"
++#include "../egl/context.h"
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#define DEBUG 0
++
++namespace {
++constexpr unsigned draw_limit = 256, blit_limit = 128, error_limit = 128, depth_limit = 64;
++std::atomic<bool> armed{false};
++std::atomic<unsigned> draw_count{0}, blit_count{0}, error_count{0};
++std::atomic<unsigned> depth_count{0}, depth_error_count{0};
++
++bool enabled() noexcept {
++    static const bool value = [] {
++        const char* setting = std::getenv("MG_BACKEND_DIAGNOSTICS");
++        return setting && std::strcmp(setting, "1") == 0 && !mg_strict_errors_enabled();
++    }();
++    return value;
++}
++
++unsigned claim(std::atomic<unsigned>& counter, unsigned limit) noexcept {
++    unsigned value = counter.load(std::memory_order_relaxed);
++    while (value < limit) {
++        if (counter.compare_exchange_weak(value, value + 1, std::memory_order_relaxed)) return value + 1;
++    }
++    return 0;
++}
++
++unsigned drain(GLenum (&errors)[8]) noexcept {
++    unsigned count = 0;
++    while (count < 8) {
++        const GLenum error = GLES.glGetError();
++        if (error == GL_NO_ERROR) break;
++        errors[count++] = error;
++    }
++    return count;
++}
++
++void format_errors(const GLenum* errors, unsigned count, char (&text)[96]) noexcept {
++    size_t used = 0;
++    text[0] = '\0';
++    if (count == 0) {
++        std::snprintf(text, sizeof(text), "none");
++        return;
++    }
++    for (unsigned i = 0; i < count; ++i) {
++        const int n = std::snprintf(text + used, sizeof(text) - used, "%s0x%x", i ? "," : "", errors[i]);
++        if (n < 0 || static_cast<size_t>(n) >= sizeof(text) - used) break;
++        used += static_cast<size_t>(n);
++    }
++    if (count == 8) std::snprintf(text + used, sizeof(text) - used, ",bounded");
++}
++
++struct probe_errors {
++    GLenum values[8] = {};
++    unsigned count = 0;
++    bool capture() noexcept {
++        GLenum current[8];
++        const unsigned n = drain(current);
++        for (unsigned i = 0; i < n && count < 8; ++i) values[count++] = current[i];
++        return n == 0;
++    }
++};
++
++struct attachment_info {
++    GLint type = -1, name = -1, level = -1, layer = -1, face = -1, target = -1;
++    GLint format = -1, width = -1, height = -1, layers = -1, samples = -1;
++    GLint depth_bits = -1, stencil_bits = -1, component_type = -1;
++};
++
++void texture_info(attachment_info& info, GLint minor, probe_errors& probe, probe_errors& target_probe) noexcept {
++    if (!GLES.glIsTexture || !GLES.glBindTexture || !GLES.glGetTexLevelParameteriv) return;
++    const bool exists = GLES.glIsTexture(static_cast<GLuint>(info.name));
++    if (!probe.capture() || !exists) return;
++    struct candidate { GLenum target, binding; GLint minor; };
++    const candidate targets[] = {
++        {GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D, 0},
++        {GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BINDING_CUBE_MAP, 0},
++        {GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BINDING_2D_ARRAY, 0},
++        {GL_TEXTURE_3D, GL_TEXTURE_BINDING_3D, 0},
++        {GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_BINDING_2D_MULTISAMPLE, 1},
++        {GL_TEXTURE_2D_MULTISAMPLE_ARRAY, GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY, 2},
++        {GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_BINDING_CUBE_MAP_ARRAY, 2}
++    };
++    for (const auto& candidate : targets) {
++        if (candidate.minor > minor || (info.face > 0 && candidate.target != GL_TEXTURE_CUBE_MAP)) continue;
++        GLint saved = -1;
++        GLES.glGetIntegerv(candidate.binding, &saved);
++        if (!probe.capture() || saved < 0) continue;
++        // Existing objects reject a different target without changing their type.
++        GLES.glBindTexture(candidate.target, static_cast<GLuint>(info.name));
++        const bool bound = target_probe.capture();
++        if (bound) {
++            info.target = static_cast<GLint>(candidate.target);
++            const GLenum query_target = candidate.target == GL_TEXTURE_CUBE_MAP
++                ? (info.face > 0 ? static_cast<GLenum>(info.face) : GL_TEXTURE_CUBE_MAP_POSITIVE_X) : candidate.target;
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_INTERNAL_FORMAT, &info.format);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_WIDTH, &info.width);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_HEIGHT, &info.height);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_DEPTH, &info.layers);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_SAMPLES, &info.samples);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_DEPTH_SIZE, &info.depth_bits);
++            GLES.glGetTexLevelParameteriv(query_target, info.level, GL_TEXTURE_STENCIL_SIZE, &info.stencil_bits);
++            probe.capture();
++        }
++        GLES.glBindTexture(candidate.target, static_cast<GLuint>(saved));
++        probe.capture();
++        if (bound) break;
++    }
++}
++
++attachment_info attachment(GLenum target, GLint fbo, GLenum point, GLint minor,
++                           probe_errors& probe, probe_errors& target_probe) noexcept {
++    attachment_info info;
++    if (fbo < 0 || !GLES.glGetFramebufferAttachmentParameteriv) return info;
++    const GLenum query_point = fbo == 0 ? (point == GL_DEPTH_ATTACHMENT ? GL_DEPTH : GL_STENCIL) : point;
++    GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &info.type);
++    if (!probe.capture() || info.type == GL_NONE) return info;
++    GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &info.depth_bits);
++    GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &info.stencil_bits);
++    GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &info.component_type);
++    if (fbo == 0) {
++        probe.capture();
++        return info;
++    }
++    GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &info.name);
++    if (!probe.capture()) return info;
++    if (info.type == GL_TEXTURE) {
++        GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, &info.level);
++        GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER, &info.layer);
++        GLES.glGetFramebufferAttachmentParameteriv(target, query_point, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE, &info.face);
++        if (probe.capture()) texture_info(info, minor, probe, target_probe);
++    } else if (info.type == GL_RENDERBUFFER && GLES.glIsRenderbuffer && GLES.glBindRenderbuffer && GLES.glGetRenderbufferParameteriv) {
++        const bool exists = GLES.glIsRenderbuffer(static_cast<GLuint>(info.name));
++        if (!probe.capture() || !exists) return info;
++        GLint saved = -1;
++        GLES.glGetIntegerv(GL_RENDERBUFFER_BINDING, &saved);
++        if (!probe.capture() || saved < 0) return info;
++        GLES.glBindRenderbuffer(GL_RENDERBUFFER, static_cast<GLuint>(info.name));
++        if (probe.capture()) {
++            info.target = GL_RENDERBUFFER;
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &info.format);
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &info.width);
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &info.height);
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_DEPTH_SIZE, &info.depth_bits);
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_STENCIL_SIZE, &info.stencil_bits);
++            GLES.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &info.samples);
++            probe.capture();
++        }
++        GLES.glBindRenderbuffer(GL_RENDERBUFFER, static_cast<GLuint>(saved));
++        probe.capture();
++    }
++    return info;
++}
++
++void describe(const attachment_info& value, char (&text)[384]) noexcept {
++    std::snprintf(text, sizeof(text), "type=0x%x name=%d target=0x%x level=%d layer=%d face=0x%x format=0x%x size=%dx%dx%d depth=%d stencil=%d component=0x%x samples=%d",
++                  value.type, value.name, value.target, value.level, value.layer, value.face, value.format,
++                  value.width, value.height, value.layers, value.depth_bits, value.stencil_bits, value.component_type, value.samples);
++}
++}
++
++void mg_backend_diag_arm() noexcept {
++    if (!enabled() || armed.exchange(true, std::memory_order_relaxed)) return;
++    LOG_W_FORCE("[MG-BACKEND] depth-range trigger: detailed draws=%u colorBlits=%u; depth/stencil success=%u failure=%u independent; raw error reads consume driver errors; diagnostic use only",
++                draw_limit, blit_limit, depth_limit, depth_limit);
++}
++
++mg_backend_diagnostic::mg_backend_diagnostic(mg_backend_diag_kind kind, const char* operation,
++                                            GLenum mode, GLsizei count, GLenum type) noexcept {
++    if (!enabled() || !GLES.glGetError) return;
++    kind_ = kind;
++    operation_ = operation;
++    mode_ = mode;
++    count_ = count;
++    type_ = type;
++    slot_ = 0;
++    depth_copy_ = kind == mg_backend_diag_kind::blit && (mode & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
++    error_slot_ = 0;
++    if (depth_copy_) {
++        slot_ = claim(depth_count, depth_limit);
++        depth_error_slot_ = claim(depth_error_count, depth_limit);
++    } else if (armed.load(std::memory_order_relaxed)) {
++        slot_ = kind == mg_backend_diag_kind::draw ? claim(draw_count, draw_limit) : claim(blit_count, blit_limit);
++    }
++    detailed_ = slot_ != 0;
++    if (!depth_copy_ && !detailed_) error_slot_ = claim(error_count, error_limit);
++    if (!detailed_ && !error_slot_ && !depth_error_slot_) return;
++    active_ = true;
++    // Keep pre-existing and operation errors separate; neither uses the shader error channel.
++    prior_count_ = drain(prior_);
++}
++
++void mg_backend_diagnostic::set_blit_region(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
++                                           GLint dx0, GLint dy0, GLint dx1, GLint dy1,
++                                           GLuint logical_read, GLuint logical_draw) noexcept {
++    if (!active_) return;
++    const GLint values[] = {sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1};
++    for (unsigned i = 0; i < 8; ++i) rectangle_[i] = values[i];
++    logical_read_ = logical_read;
++    logical_draw_ = logical_draw;
++}
++
++void mg_backend_diagnostic::finish() noexcept {
++    if (!active_) return;
++    active_ = false;
++    GLenum after[8];
++    const unsigned after_count = drain(after);
++    const bool failed = prior_count_ != 0 || after_count != 0;
++    if (depth_copy_) {
++        if (after_count != 0) {
++            if (slot_) depth_count.fetch_sub(1, std::memory_order_relaxed);
++            if (!depth_error_slot_) return;
++            slot_ = depth_error_slot_;
++        } else {
++            if (depth_error_slot_) depth_error_count.fetch_sub(1, std::memory_order_relaxed);
++            if (!slot_) return;
++        }
++    } else if (!detailed_) {
++        if (!failed) {
++            error_count.fetch_sub(1, std::memory_order_relaxed);
++            return;
++        }
++    }
++    char before_text[96], after_text[96], probe_text[96];
++    format_errors(prior_, prior_count_, before_text);
++    format_errors(after, after_count, after_text);
++
++    if (depth_copy_) {
++        probe_errors probe, target_probe;
++        GLint draw = -1, read = -1, draw_samples = -1, read_samples = -1, minor = -1;
++        GLint active_texture = -1;
++        GLenum draw_status = 0, read_status = 0;
++        attachment_info rd, rs, dd, ds;
++        if (GLES.glGetIntegerv && GLES.glCheckFramebufferStatus) {
++            GLES.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
++            GLES.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
++            GLES.glGetIntegerv(GL_MINOR_VERSION, &minor);
++            GLES.glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
++            GLES.glGetIntegerv(GL_SAMPLES, &draw_samples);
++            draw_status = GLES.glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
++            read_status = GLES.glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
++            probe.capture();
++            if (read == draw) read_samples = draw_samples;
++            else if (read >= 0 && draw >= 0 && GLES.glBindFramebuffer) {
++                GLES.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(read));
++                if (probe.capture()) GLES.glGetIntegerv(GL_SAMPLES, &read_samples);
++                probe.capture();
++                GLES.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw));
++                probe.capture();
++            }
++            rd = attachment(GL_READ_FRAMEBUFFER, read, GL_DEPTH_ATTACHMENT, minor, probe, target_probe);
++            rs = attachment(GL_READ_FRAMEBUFFER, read, GL_STENCIL_ATTACHMENT, minor, probe, target_probe);
++            dd = attachment(GL_DRAW_FRAMEBUFFER, draw, GL_DEPTH_ATTACHMENT, minor, probe, target_probe);
++            ds = attachment(GL_DRAW_FRAMEBUFFER, draw, GL_STENCIL_ATTACHMENT, minor, probe, target_probe);
++        }
++        probe.capture();
++        char rd_text[384], rs_text[384], dd_text[384], ds_text[384], target_text[96];
++        describe(rd, rd_text); describe(rs, rs_text); describe(dd, dd_text); describe(ds, ds_text);
++        format_errors(probe.values, probe.count, probe_text);
++        format_errors(target_probe.values, target_probe.count, target_text);
++        LOG_W_FORCE("[MG-DEPTH-BLIT] ctx=%llu result=%s detail=%u/%u mask=0x%x filter=0x%x src=%d,%d,%d,%d dst=%d,%d,%d,%d "
++                    "logical(read=%u draw=%u) driver(read=%d draw=%d status=0x%x/0x%x samples=%d/%d activeTexture=0x%x) "
++                    "prior=[%s] call=[%s] probe=[%s] targetProbe=[%s] "
++                    "readDepth={%s} readStencil={%s} drawDepth={%s} drawStencil={%s}",
++                    g_current_ctx ? g_current_ctx->id : 0ULL, after_count ? "failed" : "ok", slot_, depth_limit, mode_, type_,
++                    rectangle_[0], rectangle_[1], rectangle_[2], rectangle_[3], rectangle_[4], rectangle_[5], rectangle_[6], rectangle_[7],
++                    logical_read_, logical_draw_, read, draw, read_status, draw_status, read_samples, draw_samples, active_texture,
++                    before_text, after_text, probe_text, target_text, rd_text, rs_text, dd_text, ds_text);
++        return;
++    }
++
++    GLint draw_fbo = -1, read_fbo = -1, vao = -1, ibo = -1, vbo = -1, program = -1, depth_func = -1;
++    GLint viewport[4] = {}, scissor[4] = {};
++    GLfloat depth_range[2] = {};
++    GLboolean depth_test = 0, depth_write = 0, scissor_test = 0, cull = 0, blend = 0;
++    GLenum draw_status = 0, read_status = 0;
++    const bool state_available = GLES.glGetIntegerv && GLES.glGetFloatv && GLES.glGetBooleanv && GLES.glCheckFramebufferStatus;
++    if (state_available) {
++        GLES.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
++        GLES.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
++        GLES.glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
++        GLES.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ibo);
++        GLES.glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &vbo);
++        GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &program);
++        GLES.glGetIntegerv(GL_VIEWPORT, viewport);
++        GLES.glGetIntegerv(GL_SCISSOR_BOX, scissor);
++        GLES.glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
++        GLES.glGetFloatv(GL_DEPTH_RANGE, depth_range);
++        GLES.glGetBooleanv(GL_DEPTH_TEST, &depth_test);
++        GLES.glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write);
++        GLES.glGetBooleanv(GL_SCISSOR_TEST, &scissor_test);
++        GLES.glGetBooleanv(GL_CULL_FACE, &cull);
++        GLES.glGetBooleanv(GL_BLEND, &blend);
++        draw_status = GLES.glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
++        read_status = GLES.glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
++    }
++    GLenum probe[8];
++    const unsigned probe_count = drain(probe);
++    format_errors(probe, probe_count, probe_text);
++    LOG_W_FORCE("[MG-BACKEND] op=%s ctx=%llu detail=%u/%u error=%u/%u modeOrMask=0x%x count=%d typeOrFilter=0x%x "
++                "prior=[%s] call=[%s] probe=[%s] state=%d driver(drawFbo=%d readFbo=%d status=0x%x/0x%x vao=%d ibo=%d vbo=%d program=%d) "
++                "viewport=%d,%d,%d,%d scissor=%u:%d,%d,%d,%d depth=%u:%u:0x%x:[%.9g,%.9g] cull=%u blend=%u",
++                operation_, g_current_ctx ? g_current_ctx->id : 0ULL, slot_,
++                kind_ == mg_backend_diag_kind::draw ? draw_limit : blit_limit, error_slot_, error_limit,
++                mode_, count_, type_, before_text, after_text, probe_text, state_available ? 1 : 0,
++                draw_fbo, read_fbo, draw_status, read_status, vao, ibo, vbo, program,
++                viewport[0], viewport[1], viewport[2], viewport[3], scissor_test,
++                scissor[0], scissor[1], scissor[2], scissor[3], depth_test, depth_write, depth_func,
++                depth_range[0], depth_range[1], cull, blend);
++}
+--- /dev/null
++++ b/MobileGlues-cpp/gl/backend_diagnostics.h
+@@ -0,0 +1,42 @@
++// Modified for FCL Quest VR on 2026-11-12: independent depth-copy diagnostics.
++// Copyright (c) 2026 FCL Quest contributors
++// SPDX-License-Identifier: LGPL-2.1-only
++#ifndef MOBILEGLUES_BACKEND_DIAGNOSTICS_H
++#define MOBILEGLUES_BACKEND_DIAGNOSTICS_H
++
++#include <GL/gl.h>
++
++enum class mg_backend_diag_kind { draw, blit };
++
++void mg_backend_diag_arm() noexcept;
++
++class mg_backend_diagnostic {
++public:
++    mg_backend_diagnostic(mg_backend_diag_kind kind, const char* operation,
++                          GLenum mode = 0, GLsizei count = 0, GLenum type = 0) noexcept;
++    ~mg_backend_diagnostic() noexcept { finish(); }
++    void finish() noexcept;
++    void set_blit_region(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
++                         GLint dx0, GLint dy0, GLint dx1, GLint dy1,
++                         GLuint logical_read, GLuint logical_draw) noexcept;
++    mg_backend_diagnostic(const mg_backend_diagnostic&) = delete;
++    mg_backend_diagnostic& operator=(const mg_backend_diagnostic&) = delete;
++
++private:
++    bool active_ = false;
++    bool detailed_;
++    unsigned slot_;
++    unsigned error_slot_;
++    unsigned depth_error_slot_ = 0;
++    bool depth_copy_ = false;
++    mg_backend_diag_kind kind_;
++    const char* operation_;
++    GLenum mode_, type_;
++    GLsizei count_;
++    GLenum prior_[8];
++    unsigned prior_count_;
++    GLint rectangle_[8] = {};
++    GLuint logical_read_ = 0, logical_draw_ = 0;
++};
++
++#endif
+--- a/MobileGlues-cpp/gl/buffer.cpp
++++ b/MobileGlues-cpp/gl/buffer.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: preserve application errors during buffer mapping.
+ // MobileGlues - gl/buffer.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -1046,9 +1047,9 @@
+         borrowed_target_t t(target);
+         return GLES.glMapBufferOES(t.target, access);
+     }
+-    GLint buffer_size;
++    GLint buffer_size = 0;
+     glGetBufferParameteriv(target, GL_BUFFER_SIZE, &buffer_size);
+-    if (buffer_size <= 0 || glGetError() != GL_NO_ERROR) {
++    if (buffer_size <= 0) {
+         return nullptr;
+     }
+     GLbitfield flags = 0;
+@@ -1063,6 +1064,7 @@
+         flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
+         break;
+     default:
++        mg_set_gl_error(GL_INVALID_ENUM);
+         return nullptr;
+     }
+     void* ptr = glMapBufferRange(target, 0, buffer_size, flags);
+--- /dev/null
++++ b/MobileGlues-cpp/gl/depth_upload.cpp
+@@ -0,0 +1,231 @@
++// Added for FCL Quest VR on 2026-11-12: desktop depth uploads into GLES sized storage.
++// Copyright (c) 2026 cff1028
++// SPDX-License-Identifier: LGPL-2.1-only
++#include "depth_upload.h"
++#include "glcorearb.h"
++#include "../gles/loader.h"
++#include "pixel.h"
++#include "mg.h"
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <limits>
++#include <new>
++#include <stdexcept>
++
++namespace {
++constexpr GLenum unpack_names[] = {GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_SKIP_ROWS,
++                                  GL_UNPACK_SKIP_PIXELS, GL_UNPACK_IMAGE_HEIGHT, GL_UNPACK_SKIP_IMAGES};
++
++bool multiply(size_t a, size_t b, size_t& result) {
++    if (b && a > std::numeric_limits<size_t>::max() / b) return false;
++    result = a * b;
++    return true;
++}
++
++bool add(size_t a, size_t b, size_t& result) {
++    if (a > std::numeric_limits<size_t>::max() - b) return false;
++    result = a + b;
++    return true;
++}
++
++size_t component_size(GLenum type) {
++    return type == GL_UNSIGNED_SHORT ? 2 : type == GL_UNSIGNED_INT || type == GL_FLOAT ? 4 : 0;
++}
++
++GLenum upload_type(GLenum storage, GLenum source) {
++    if (storage == GL_DEPTH_COMPONENT32F) return GL_FLOAT;
++    if (storage == GL_DEPTH_COMPONENT16) return source == GL_FLOAT ? GL_UNSIGNED_INT : source;
++    if (storage == GL_DEPTH_COMPONENT24 || storage == GL_DEPTH_COMPONENT) return GL_UNSIGNED_INT;
++    return source;
++}
++
++bool depth_target(GLenum target) {
++    return target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP_ARRAY ||
++           (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z);
++}
++
++double read_depth(const uint8_t* input, GLenum type, bool swap) {
++    uint8_t bytes[4];
++    const size_t size = component_size(type);
++    for (size_t i = 0; i < size; ++i) bytes[i] = input[swap ? size - i - 1 : i];
++    if (type == GL_UNSIGNED_SHORT) {
++        uint16_t value;
++        std::memcpy(&value, bytes, sizeof(value));
++        return static_cast<double>(value) / 65535.0;
++    }
++    if (type == GL_UNSIGNED_INT) {
++        uint32_t value;
++        std::memcpy(&value, bytes, sizeof(value));
++        return static_cast<double>(value) / 4294967295.0;
++    }
++    float value;
++    std::memcpy(&value, bytes, sizeof(value));
++    if (!(value > 0.0f)) return 0.0;
++    return value < 1.0f ? value : 1.0;
++}
++
++void write_depth(uint8_t* output, GLenum type, double value) {
++    if (type == GL_FLOAT) {
++        const float result = static_cast<float>(value);
++        std::memcpy(output, &result, sizeof(result));
++    } else if (type == GL_UNSIGNED_SHORT) {
++        const uint16_t result = static_cast<uint16_t>(std::round(value * 65535.0));
++        std::memcpy(output, &result, sizeof(result));
++    } else {
++        const uint32_t result = static_cast<uint32_t>(std::round(value * 4294967295.0));
++        std::memcpy(output, &result, sizeof(result));
++    }
++}
++}
++
++GLenum mg_depth_level_format(GLenum target, GLint level, GLenum format) {
++    if (format != GL_DEPTH_COMPONENT || !depth_target(target) || level < 0 || !GLES.glGetTexLevelParameteriv) return 0;
++    GLint storage = 0;
++    GLES.glGetTexLevelParameteriv(target, level, GL_TEXTURE_INTERNAL_FORMAT, &storage);
++    return static_cast<GLenum>(storage);
++}
++
++void mg_depth_upload_t::fail(GLenum error) {
++    dropped_ = true;
++    mg_set_gl_error(error);
++}
++
++mg_depth_upload_t::mg_depth_upload_t(GLenum target, GLint level, GLsizei width, GLsizei height, GLsizei depth,
++                                     GLenum format, GLenum source_type, const void* source, GLenum storage,
++                                     bool three_d, bool subimage, GLint x, GLint y, GLint z, GLint border)
++    : type(source_type), pixels(source) {
++    if (format != GL_DEPTH_COMPONENT || !depth_target(target) || component_size(source_type) == 0) return;
++    const bool array = target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP_ARRAY;
++    if (three_d != array) return;
++    if (storage != GL_DEPTH_COMPONENT16 && storage != GL_DEPTH_COMPONENT24 && storage != GL_DEPTH_COMPONENT32F &&
++        storage != GL_DEPTH_COMPONENT) return;
++    const GLenum converted_type = upload_type(storage, source_type);
++    const bool swap = mg_unpack_swaps_bytes(source_type);
++    if (converted_type == source_type && !swap) return;
++    GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer_);
++    if (!source && unpack_buffer_ == 0 && !subimage) return;
++    const bool cube_face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
++    const bool cube = cube_face || target == GL_TEXTURE_CUBE_MAP_ARRAY;
++    if (width < 0 || height < 0 || depth < 0 || level < 0 || border != 0 || (!subimage && cube && width != height)) {
++        fail(GL_INVALID_VALUE); return;
++    }
++    if (!subimage && target == GL_TEXTURE_CUBE_MAP_ARRAY && depth % 6 != 0) { fail(GL_INVALID_VALUE); return; }
++    if (!subimage) {
++        GLint immutable = 0;
++        GLES.glGetTexParameteriv(cube_face ? GL_TEXTURE_CUBE_MAP : target, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
++        if (immutable) { fail(GL_INVALID_OPERATION); return; }
++    }
++    if (width == 0 || height == 0 || depth == 0) {
++        if (unpack_buffer_ != 0) {
++            GLint mapped = 0, access = 0;
++            GLint64 capacity = 0;
++            const uintptr_t offset = reinterpret_cast<uintptr_t>(source);
++            GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_MAPPED, &mapped);
++            if (mapped) GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_ACCESS_FLAGS, &access);
++            GLES.glGetBufferParameteri64v(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &capacity);
++            if ((mapped && !(access & GL_MAP_PERSISTENT_BIT)) || capacity < 0 || offset % component_size(source_type) ||
++                offset > static_cast<uint64_t>(capacity)) { fail(GL_INVALID_OPERATION); return; }
++        }
++        type = converted_type;
++        pixels = nullptr;
++        return;
++    }
++    if (!source && unpack_buffer_ == 0) { fail(GL_INVALID_OPERATION); return; }
++
++    GLint maximum = 0;
++    GLES.glGetIntegerv(cube ? GL_MAX_CUBE_MAP_TEXTURE_SIZE : GL_MAX_TEXTURE_SIZE, &maximum);
++    if (level >= 31 || (maximum >> level) == 0 || width > (maximum >> level) || height > (maximum >> level)) {
++        fail(GL_INVALID_VALUE); return;
++    }
++    if (array) {
++        GLES.glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maximum);
++        if (depth > maximum) { fail(GL_INVALID_VALUE); return; }
++    }
++    if (subimage && GLES.glGetTexLevelParameteriv) {
++        GLint extent[3] = {0, 0, 1};
++        GLES.glGetTexLevelParameteriv(target, level, GL_TEXTURE_WIDTH, &extent[0]);
++        GLES.glGetTexLevelParameteriv(target, level, GL_TEXTURE_HEIGHT, &extent[1]);
++        if (three_d) GLES.glGetTexLevelParameteriv(target, level, GL_TEXTURE_DEPTH, &extent[2]);
++        if (x < 0 || y < 0 || z < 0 || x > extent[0] || y > extent[1] || z > extent[2] ||
++            width > extent[0] - x || height > extent[1] - y || depth > extent[2] - z) {
++            fail(GL_INVALID_VALUE); return;
++        }
++    }
++    for (size_t i = 0; i < 6; ++i) GLES.glGetIntegerv(unpack_names[i], &unpack_[i]);
++    if (unpack_[0] != 1 && unpack_[0] != 2 && unpack_[0] != 4 && unpack_[0] != 8) { fail(GL_INVALID_VALUE); return; }
++    for (size_t i = 1; i < 6; ++i) if (unpack_[i] < 0) { fail(GL_INVALID_VALUE); return; }
++    const size_t input_size = component_size(source_type), output_size = component_size(converted_type);
++    size_t row_stride, image_stride, start, span, temporary, size;
++    const size_t row_pixels = unpack_[1] ? unpack_[1] : width;
++    const size_t image_rows = three_d && unpack_[4] ? unpack_[4] : height;
++    const size_t skip_images = three_d ? unpack_[5] : 0;
++    if (!multiply(row_pixels, input_size, row_stride) || !add(row_stride, unpack_[0] - 1, row_stride)) { fail(GL_INVALID_VALUE); return; }
++    row_stride -= row_stride % unpack_[0];
++    if (!multiply(row_stride, image_rows, image_stride) || !multiply(image_stride, skip_images, start) ||
++        !multiply(row_stride, unpack_[2], temporary) || !add(start, temporary, start) ||
++        !multiply(input_size, unpack_[3], temporary) || !add(start, temporary, start) ||
++        !multiply(image_stride, depth - 1, temporary) || !add(start, temporary, span) ||
++        !multiply(row_stride, height - 1, temporary) || !add(span, temporary, span) ||
++        !multiply(input_size, width, temporary) || !add(span, temporary, span) ||
++        !multiply(width, height, size) || !multiply(size, depth, size) || !multiply(size, output_size, size)) {
++        fail(GL_INVALID_VALUE); return;
++    }
++    if (span > static_cast<size_t>(std::numeric_limits<GLsizeiptr>::max())) { fail(GL_INVALID_OPERATION); return; }
++    const uintptr_t address = reinterpret_cast<uintptr_t>(source);
++    if (address > std::numeric_limits<uintptr_t>::max() - span) { fail(GL_INVALID_OPERATION); return; }
++    if (unpack_buffer_ != 0) {
++        GLint mapped = 0, access = 0;
++        GLint64 capacity = 0;
++        GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_MAPPED, &mapped);
++        if (mapped) GLES.glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_ACCESS_FLAGS, &access);
++        GLES.glGetBufferParameteri64v(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &capacity);
++        if ((mapped && !(access & GL_MAP_PERSISTENT_BIT)) || capacity < 0 || address % input_size || address > static_cast<uint64_t>(capacity) ||
++            span > static_cast<uint64_t>(capacity) - address) { fail(GL_INVALID_OPERATION); return; }
++    }
++    try { data_.resize(size); }
++    catch (const std::bad_alloc&) { fail(GL_OUT_OF_MEMORY); return; }
++    catch (const std::length_error&) { fail(GL_OUT_OF_MEMORY); return; }
++    const uint8_t* input = static_cast<const uint8_t*>(source);
++    if (unpack_buffer_ != 0) {
++        GLES.glGetIntegerv(GL_COPY_WRITE_BUFFER_BINDING, &copy_write_);
++        GLES.glGenBuffers(1, &scratch_buffer_);
++        if (!scratch_buffer_) { fail(GL_OUT_OF_MEMORY); return; }
++        GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, scratch_buffer_);
++        GLES.glBufferData(GL_COPY_WRITE_BUFFER, static_cast<GLsizeiptr>(span), nullptr, GL_STREAM_READ);
++        GLint64 allocated = 0;
++        GLES.glGetBufferParameteri64v(GL_COPY_WRITE_BUFFER, GL_BUFFER_SIZE, &allocated);
++        if (allocated != static_cast<GLint64>(span)) { fail(GL_OUT_OF_MEMORY); return; }
++        GLES.glCopyBufferSubData(GL_PIXEL_UNPACK_BUFFER, GL_COPY_WRITE_BUFFER, static_cast<GLintptr>(address), 0, static_cast<GLsizeiptr>(span));
++        input = static_cast<const uint8_t*>(GLES.glMapBufferRange(GL_COPY_WRITE_BUFFER, 0, static_cast<GLsizeiptr>(span), GL_MAP_READ_BIT));
++        if (!input) { fail(GL_INVALID_OPERATION); return; }
++    }
++    uint8_t* output = data_.data();
++    for (GLsizei layer = 0; layer < depth; ++layer) {
++        for (GLsizei row = 0; row < height; ++row) {
++            const uint8_t* pixel = input + start + static_cast<size_t>(layer) * image_stride + static_cast<size_t>(row) * row_stride;
++            for (GLsizei column = 0; column < width; ++column) {
++                write_depth(output, converted_type, read_depth(pixel, source_type, swap));
++                output += output_size;
++                pixel += input_size;
++            }
++        }
++    }
++    if (scratch_buffer_ && !GLES.glUnmapBuffer(GL_COPY_WRITE_BUFFER)) { fail(GL_INVALID_OPERATION); return; }
++    if (unpack_buffer_ != 0) GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++    for (size_t i = 0; i < 6; ++i) GLES.glPixelStorei(unpack_names[i], i == 0 ? 1 : 0);
++    changed_unpack_ = true;
++    type = converted_type;
++    pixels = data_.data();
++}
++
++mg_depth_upload_t::~mg_depth_upload_t() {
++    if (changed_unpack_) {
++        for (size_t i = 0; i < 6; ++i) GLES.glPixelStorei(unpack_names[i], unpack_[i]);
++        if (unpack_buffer_ != 0) GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpack_buffer_));
++    }
++    if (scratch_buffer_) {
++        GLES.glBindBuffer(GL_COPY_WRITE_BUFFER, static_cast<GLuint>(copy_write_));
++        GLES.glDeleteBuffers(1, &scratch_buffer_);
++    }
++}
+--- /dev/null
++++ b/MobileGlues-cpp/gl/depth_upload.h
+@@ -0,0 +1,36 @@
++// Added for FCL Quest VR on 2026-11-12.
++// Copyright (c) 2026 cff1028
++// SPDX-License-Identifier: LGPL-2.1-only
++#ifndef MOBILEGLUES_DEPTH_UPLOAD_H
++#define MOBILEGLUES_DEPTH_UPLOAD_H
++
++#include <GL/gl.h>
++#include <vector>
++#include <cstdint>
++
++GLenum mg_depth_level_format(GLenum target, GLint level, GLenum format);
++
++class mg_depth_upload_t {
++public:
++    mg_depth_upload_t(GLenum target, GLint level, GLsizei width, GLsizei height, GLsizei depth,
++                      GLenum format, GLenum source_type, const void* source, GLenum storage,
++                      bool three_d, bool subimage = false, GLint x = 0, GLint y = 0, GLint z = 0, GLint border = 0);
++    ~mg_depth_upload_t();
++    mg_depth_upload_t(const mg_depth_upload_t&) = delete;
++    mg_depth_upload_t& operator=(const mg_depth_upload_t&) = delete;
++    bool dropped() const { return dropped_; }
++    GLenum type;
++    const void* pixels;
++
++private:
++    void fail(GLenum error);
++    std::vector<uint8_t> data_;
++    GLint unpack_[6] = {};
++    GLint unpack_buffer_ = 0;
++    GLint copy_write_ = 0;
++    GLuint scratch_buffer_ = 0;
++    bool dropped_ = false;
++    bool changed_unpack_ = false;
++};
++
++#endif
+--- a/MobileGlues-cpp/gl/drawing.cpp
++++ b/MobileGlues-cpp/gl/drawing.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: optional bounded draw diagnostics.
+ // MobileGlues - gl/drawing.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -6,6 +7,8 @@
+ // End of Source File Header
+ 
+ #include "drawing.h"
++#include "backend_diagnostics.h"
++#include "vrm_diagnostics.h"
+ #include "restart.h"
+ #include "buffer.h"
+ #include "framebuffer.h"
+@@ -216,12 +219,15 @@
+ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+     LOG()
+     LOG_D("glDrawElements, mode: %d, count: %d, type: %d, indices: %p", mode, count, type, indices)
+-    prepareForDraw();
++    mg_backend_diagnostic diagnostic(mg_backend_diag_kind::draw, "glDrawElements", mode, count, type);
++    prepareForDraw();
++    mg_vrm_diagnostic(mode, count, type);
+     if (mg_restart_needs_rewrite(type) && mg_draw_elements_restart(mode, count, type, indices, 0, -1)) return;
+     const bool restart_fixed = mg_restart_needs_driver_fixed(type);
+     if (restart_fixed) GLES.glEnable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+     GLES.glDrawElements(mode, count, type, indices);
+     if (restart_fixed) GLES.glDisable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
++    diagnostic.finish();
+     CHECK_GL_ERROR
+ }
+ 
+--- a/MobileGlues-cpp/gl/enable.cpp
++++ b/MobileGlues-cpp/gl/enable.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: consistent typed capability queries.
+ // MobileGlues - gl/enable.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -7,6 +8,7 @@
+ 
+ #include "enable.h"
+ #include "pixel.h"
++#include "framebuffer.h"
+ #include "../gles/loader.h"
+ #include "log.h"
+ #include "mg.h"
+@@ -584,6 +586,10 @@
+         LOG()
+         GLboolean enabled = GL_FALSE;
+         GLint ival = 0;
++        if (mg_query_texture_unit_limit(pname, &ival) || mg_get_framebuffer_binding_parameter(pname, &ival)) {
++            *data = ival != 0 ? GL_TRUE : GL_FALSE;
++            return;
++        }
+         if (mg_enable_query(pname, &enabled)) {
+             *data = enabled;
+             return;
+@@ -603,6 +609,10 @@
+         LOG()
+         GLboolean enabled = GL_FALSE;
+         GLint ival = 0;
++        if (mg_query_texture_unit_limit(pname, &ival) || mg_get_framebuffer_binding_parameter(pname, &ival)) {
++            *data = static_cast<GLfloat>(ival);
++            return;
++        }
+         if (mg_enable_query(pname, &enabled)) {
+             *data = enabled ? 1.0f : 0.0f;
+             return;
+@@ -622,6 +632,10 @@
+         LOG()
+         GLboolean enabled = GL_FALSE;
+         GLint ival = 0;
++        if (mg_query_texture_unit_limit(pname, &ival) || mg_get_framebuffer_binding_parameter(pname, &ival)) {
++            *data = static_cast<GLint64>(ival);
++            return;
++        }
+         if (mg_enable_query(pname, &enabled)) {
+             *data = enabled ? 1 : 0;
+             return;
+@@ -664,6 +678,10 @@
+         LOG()
+         GLboolean enabled = GL_FALSE;
+         GLint ival = 0;
++        if (mg_query_texture_unit_limit(pname, &ival) || mg_get_framebuffer_binding_parameter(pname, &ival)) {
++            *data = static_cast<GLdouble>(ival);
++            return;
++        }
+         if (mg_enable_query(pname, &enabled)) {
+             *data = enabled ? 1.0 : 0.0;
+             return;
+--- a/MobileGlues-cpp/gl/framebuffer.cpp
++++ b/MobileGlues-cpp/gl/framebuffer.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: logical framebuffer routing and desktop queries.
+ // MobileGlues - gl/framebuffer.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -6,6 +7,8 @@
+ // End of Source File Header
+ 
+ #include "framebuffer.h"
++#include "mg.h"
++#include "backend_diagnostics.h"
+ #include "../egl/context.h"
+ #include <mutex>
+ #include <memory>
+@@ -31,8 +34,6 @@
+         }                                                                                                              \
+     } while (0)
+ 
+-static GLint MAX_COLOR_ATTACHMENTS = 0;
+-static GLint MAX_DRAW_BUFFERS = 0;
+ // Framebuffer objects are container state: GL does not share them across a share
+ // group, so they belong to one context. See gl/buffer.cpp for the pattern.
+ //
+@@ -56,6 +57,9 @@
+     ska::flat_hash_map<GLuint, std::unique_ptr<framebuffer_t>> table;
+     GLuint draw = 0;
+     GLuint read = 0;
++    GLuint logical_draw = 0;
++    GLint max_color_attachments = 0;
++    GLint max_draw_buffers = 0;
+ };
+ std::mutex g_fbo_mutex;
+ // By pointer for the same reason: g_fc is a thread_local into an entry.
+@@ -94,6 +98,8 @@
+ #define framebuffers (g_fc->table)
+ #define current_draw_fbo (g_fc->draw)
+ #define current_read_fbo (g_fc->read)
++#define MAX_COLOR_ATTACHMENTS (g_fc->max_color_attachments)
++#define MAX_DRAW_BUFFERS (g_fc->max_draw_buffers)
+ // gl/gl.cpp used to reach in with mg_framebuffers()[current_draw_fbo], which is
+ // the same unchecked index from another translation unit and could not see the
+ // table's size. It gets the predicate instead.
+@@ -142,7 +148,13 @@
+     // leaves an inserted-but-empty slot behind, and this function has always
+     // filled such a slot rather than dereferencing it.
+     std::unique_ptr<framebuffer_t>& slot = framebuffers[id];
+-    if (!slot) slot = std::make_unique<framebuffer_t>();
++    if (!slot) {
++        slot = std::make_unique<framebuffer_t>();
++        if (id == 0) {
++            slot->draw_buffers[0] = GL_BACK;
++            slot->read_buffer = GL_BACK;
++        }
++    }
+     return *slot;
+ }
+ void InitFramebufferMap(size_t expectedSize) {
+@@ -167,6 +179,10 @@
+ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
+     LOG()
+     LOG_D("glBindFramebuffer, target = %s, framebuffer = %u", glEnumToString(target), framebuffer)
++    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
++        mg_set_gl_error(GL_INVALID_ENUM);
++        return;
++    }
+     ensure_max_attachments();
+ 
+     // Resolve the redirect before touching the table: this used to take the
+@@ -197,6 +213,7 @@
+ 
+     if (target == GL_DRAW_FRAMEBUFFER || target == GL_FRAMEBUFFER) {
+         current_draw_fbo = draw_fb;
++        g_fc->logical_draw = framebuffer;
+     }
+     if (target == GL_READ_FRAMEBUFFER || target == GL_FRAMEBUFFER) {
+         current_read_fbo = framebuffer;
+@@ -225,6 +242,9 @@
+     if (g_fsr_read_depth++ > 0) return; // an outer scope already holds it
+     active = true;
+     GLES.glBindFramebuffer(GL_READ_FRAMEBUFFER, FSR1_Context::g_renderFBO);
++    const auto it = framebuffers.find(0);
++    const bool none = it != framebuffers.end() && it->second && it->second->read_buffer == GL_NONE;
++    GLES.glReadBuffer(none ? GL_NONE : GL_COLOR_ATTACHMENT0);
+ }
+ mg_fsr_read_scope_t::~mg_fsr_read_scope_t() {
+     if (!counted) return;
+@@ -234,37 +254,35 @@
+     if (active) GLES.glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+ }
+ 
+-// Record what is now attached at `attachment`. Only colour attachments are kept:
+-// nothing reads depth or stencil back out of here.
+-void update_attachment(GLenum target, GLenum attachment, const attachment_t& what) {
+-    GLuint current_fbo = (target == GL_READ_FRAMEBUFFER) ? current_read_fbo : current_draw_fbo;
+-    if (current_fbo == 0) return;
+-    if (attachment < GL_COLOR_ATTACHMENT0 || attachment >= GL_COLOR_ATTACHMENT0 + (GLenum)max_color_attachments_or_default()) {
+-        return;
+-    }
+-    framebuffer_t& fbo = get_framebuffer(current_fbo);
++template<typename Operation>
++static void change_attachment(GLenum target, GLenum attachment, const attachment_t& what, Operation operation) {
++    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
++        mg_set_gl_error(GL_INVALID_ENUM);
++        return;
++    }
++    const GLuint logical = target == GL_READ_FRAMEBUFFER ? current_read_fbo : g_fc->logical_draw;
++    if (logical == 0) {
++        mg_set_gl_error(GL_INVALID_OPERATION);
++        return;
++    }
++    const GLuint id = target == GL_READ_FRAMEBUFFER ? current_read_fbo : current_draw_fbo;
++    if (attachment < GL_COLOR_ATTACHMENT0 || attachment >= GL_COLOR_ATTACHMENT0 + max_color_attachments_or_default()) {
++        operation(attachment);
++        return;
++    }
++    auto& fbo = get_framebuffer(id);
+     init_framebuffer(fbo);
+     const size_t index = attachment - GL_COLOR_ATTACHMENT0;
+-    if (index >= fbo.color_attachments.size()) return;
+-    fbo.color_attachments[index] = what;
+-    // If a shuffle had moved this attachment, that record now describes where the
+-    // PREVIOUS texture went; glReadBuffer would send the application there instead
+-    // of to what was just attached. Only this entry is dropped -- the others are
+-    // still where the shuffle put them, and forgetting that would strand them.
+-    if (index < fbo.draw_buffer_map.size()) fbo.draw_buffer_map[index] = 0;
+-}
+-
+-// Undo a shuffle: put every attachment glDrawBuffers moved back on its own
+-// attachment point.
+-//
+-// Needed because leaving the shuffled state is not free. After
+-// glDrawBuffers({ATTACHMENT1, ATTACHMENT0}) the texture the application calls
+-// attachment 0 physically sits on GL_COLOR_ATTACHMENT1, so a later
+-// glDrawBuffers({ATTACHMENT0}) -- identity order, nothing to move by itself --
+-// would draw into whatever is on physical attachment 0, which is the other
+-// texture. The old unconditional re-attach happened to fix this up on every call;
+-// anything that skips it has to put things back first.
+-void restore_home_attachments(framebuffer_t& fbo);
++    const GLenum physical = index < fbo.draw_buffer_map.size() ? fbo.draw_buffer_map[index] : attachment;
++    for (unsigned i = 0; i < 8 && mg_read_backend_error() != GL_NO_ERROR; ++i) {}
++    operation(physical);
++    bool success = true;
++    for (unsigned i = 0; i < 8; ++i) {
++        if (mg_read_backend_error() == GL_NO_ERROR) break;
++        success = false;
++    }
++    if (success) fbo.color_attachments[index] = what;
++}
+ 
+ // Put a recorded attachment onto a (possibly different) attachment point, the
+ // same way it originally arrived.
+@@ -294,51 +312,24 @@
+ }
+ 
+ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+-    update_attachment(target, attachment, {attach_kind_t::Texture2D, textarget, texture, level, 0});
+-    GLES.glFramebufferTexture2D(target, attachment, textarget, texture, level);
++    change_attachment(target, attachment, {attach_kind_t::Texture2D, textarget, texture, level, 0}, [&](GLenum physical) {
++        GLES.glFramebufferTexture2D(target, physical, textarget, texture, level);
++    });
+ }
+ void glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
+-    // Kind rather than a made-up GL_TEXTURE_2D. This entry point attaches the
+-    // whole texture, whatever its target is, and recording it as a 2D attachment
+-    // meant a replay re-attached an array or 3D texture as if it were flat.
+-    update_attachment(target, attachment, {attach_kind_t::TextureAll, 0, texture, level, 0});
+-    GLES.glFramebufferTexture(target, attachment, texture, level);
+-}
+-// Wrapped rather than passed straight through, so the record knows about them.
+-// While these bypassed the table, the record for an attachment they wrote stayed
+-// all-zero and the glDrawBuffers shuffle detached it.
++    change_attachment(target, attachment, {attach_kind_t::TextureAll, 0, texture, level, 0}, [&](GLenum physical) {
++        GLES.glFramebufferTexture(target, physical, texture, level);
++    });
++}
+ void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+-    update_attachment(target, attachment, {attach_kind_t::TextureLayer, 0, texture, level, layer});
+-    GLES.glFramebufferTextureLayer(target, attachment, texture, level, layer);
++    change_attachment(target, attachment, {attach_kind_t::TextureLayer, 0, texture, level, layer}, [&](GLenum physical) {
++        GLES.glFramebufferTextureLayer(target, physical, texture, level, layer);
++    });
+ }
+ void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+-    update_attachment(target, attachment, {attach_kind_t::Renderbuffer, renderbuffertarget, renderbuffer, 0, 0});
+-    GLES.glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer);
+-}
+-
+-void restore_home_attachments(framebuffer_t& fbo) {
+-    if (fbo.draw_buffer_map.empty()) return;
+-    // Every recorded attachment, not just the ones the map says were moved.
+-    //
+-    // The map answers "where did logical i go", which is the wrong direction for
+-    // undoing. A slot that was only ever a DESTINATION -- something else was moved
+-    // on top of it, detaching what lived there -- has a zero entry, so walking the
+-    // map skipped exactly the slot that needs repairing. With colortex0 on
+-    // attachment 0 and colortex1 on attachment 1, glDrawBuffers({ATTACHMENT1})
+-    // moves colortex1 onto physical 0; a following glDrawBuffers({ATTACHMENT0})
+-    // then found map[0] == 0, left physical 0 holding colortex1, and the pass
+-    // wrote its output into the wrong texture.
+-    //
+-    // color_attachments is the layout the application actually asked for, so
+-    // putting every entry back on its own point is both sufficient and
+-    // idempotent: re-attaching something already in place costs one call and
+-    // changes nothing.
+-    for (size_t idx = 0; idx < fbo.color_attachments.size(); ++idx) {
+-        const attachment_t& a = fbo.color_attachments[idx];
+-        if (a.kind == attach_kind_t::None) continue;
+-        reattach(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + (GLenum)idx, a);
+-    }
+-    fbo.draw_buffer_map.clear();
++    change_attachment(target, attachment, {attach_kind_t::Renderbuffer, renderbuffertarget, renderbuffer, 0, 0}, [&](GLenum physical) {
++        GLES.glFramebufferRenderbuffer(target, physical, renderbuffertarget, renderbuffer);
++    });
+ }
+ 
+ // The ARB spellings, which these three had while they were NATIVE_FUNCTION_HEAD
+@@ -357,6 +348,8 @@
+                                                    GLuint renderbuffer) __attribute__((alias("glFramebufferRenderbuffer")));
+ GLAPI GLAPIENTRY void glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level,
+                                                    GLint layer) __attribute__((alias("glFramebufferTextureLayer")));
++GLAPI GLAPIENTRY void glGetFramebufferAttachmentParameterivARB(GLenum target, GLenum attachment, GLenum pname,
++                                                              GLint* params) __attribute__((alias("glGetFramebufferAttachmentParameteriv")));
+ }
+ #endif
+ 
+@@ -371,7 +364,11 @@
+                        GLint dstY1, GLbitfield mask, GLenum filter) {
+     LOG()
+     mg_fsr_read_scope_t fsr_read;
++    mg_backend_diagnostic diagnostic(mg_backend_diag_kind::blit, "glBlitFramebuffer", mask, 0, filter);
++    diagnostic.set_blit_region(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1,
++                               current_read_fbo, current_draw_fbo);
+     GLES.glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
++    diagnostic.finish();
+     CHECK_GL_ERROR
+ }
+ 
+@@ -399,164 +396,285 @@
+     }
+     GLES.glDeleteFramebuffers(n, names);
+ }
++static GLenum mapped_attachment(const framebuffer_t& fbo, GLenum attachment) {
++    if (attachment < GL_COLOR_ATTACHMENT0) return attachment;
++    const size_t index = attachment - GL_COLOR_ATTACHMENT0;
++    return index < fbo.draw_buffer_map.size() ? fbo.draw_buffer_map[index] : attachment;
++}
++
++static bool window_buffer(GLenum buffer) {
++    return buffer == GL_BACK || buffer == GL_BACK_LEFT || buffer == GL_FRONT ||
++           buffer == GL_FRONT_LEFT || buffer == GL_LEFT || buffer == GL_FRONT_AND_BACK;
++}
++
++static bool color_attachment_enum(GLenum buffer) {
++    return buffer >= GL_COLOR_ATTACHMENT0 && buffer <= GL_COLOR_ATTACHMENT31;
++}
++
++static void set_backend_read_buffer(GLuint framebuffer, const framebuffer_t& fbo) {
++    GLint saved = 0;
++    GLES.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved);
++    if (static_cast<GLuint>(saved) != framebuffer) GLES.glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
++    GLES.glReadBuffer(mapped_attachment(fbo, fbo.read_buffer));
++    if (static_cast<GLuint>(saved) != framebuffer) GLES.glBindFramebuffer(GL_READ_FRAMEBUFFER, saved);
++}
++
++bool mg_get_framebuffer_binding_parameter(GLenum pname, GLint* value) {
++    const bool read = pname == GL_READ_BUFFER;
++    GLint index = pname == GL_DRAW_BUFFER ? 0 : static_cast<GLint>(pname) - GL_DRAW_BUFFER0;
++    const GLint limit = MAX_DRAW_BUFFERS > 0 ? MAX_DRAW_BUFFERS : 8;
++    if (!read && (index < 0 || index >= limit)) return false;
++    const GLuint id = read ? current_read_fbo : g_fc->logical_draw;
++    const auto it = framebuffers.find(id);
++    if (it == framebuffers.end() || !it->second) {
++        *value = !read && index > 0 ? GL_NONE : id == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0;
++    } else if (read) {
++        *value = it->second->read_buffer;
++    } else {
++        const auto& buffers = it->second->draw_buffers;
++        *value = static_cast<size_t>(index) < buffers.size() ? buffers[index] : GL_NONE;
++    }
++    return true;
++}
++
++void mg_get_framebuffer_snapshot(mg_framebuffer_snapshot* snapshot) {
++    snapshot->draw_fbo = g_fc->logical_draw;
++    snapshot->read_fbo = current_read_fbo;
++    const auto it = framebuffers.find(current_draw_fbo);
++    for (unsigned i = 0; i < 4; ++i) {
++        GLint buffer = GL_NONE;
++        mg_get_framebuffer_binding_parameter(GL_DRAW_BUFFER0 + i, &buffer);
++        snapshot->draw_buffers[i] = buffer;
++        snapshot->color_attachments[i] = g_fc->logical_draw == 0
++            ? (i == 0 ? (current_draw_fbo == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0) : GL_NONE)
++            : it != framebuffers.end() && it->second
++                ? mapped_attachment(*it->second, GL_COLOR_ATTACHMENT0 + i) : GL_COLOR_ATTACHMENT0 + i;
++    }
++}
++
++static bool arrange_draw_buffers(framebuffer_t& fbo, GLsizei n, const GLenum* bufs) {
++    const size_t count = fbo.color_attachments.size();
++    std::vector<GLenum> map(count, GL_NONE);
++    std::vector<bool> used(count, false);
++    for (GLsizei i = 0; i < n; ++i) {
++        if (bufs[i] == GL_NONE) continue;
++        map[bufs[i] - GL_COLOR_ATTACHMENT0] = GL_COLOR_ATTACHMENT0 + i;
++        used[i] = true;
++    }
++    for (size_t i = 0; i < count; ++i) {
++        if (map[i] == GL_NONE && !used[i]) {
++            map[i] = GL_COLOR_ATTACHMENT0 + i;
++            used[i] = true;
++        }
++    }
++    size_t next = 0;
++    for (size_t i = 0; i < count; ++i) {
++        if (map[i] != GL_NONE) continue;
++        while (used[next]) ++next;
++        map[i] = GL_COLOR_ATTACHMENT0 + next;
++        used[next] = true;
++    }
++    bool identity = true;
++    for (size_t i = 0; i < count; ++i) {
++        const GLenum home = GL_COLOR_ATTACHMENT0 + i;
++        const GLenum old = mapped_attachment(fbo, home);
++        identity = identity && map[i] == home;
++        if (old == map[i] || fbo.color_attachments[i].kind != attach_kind_t::None) continue;
++        GLint type = GL_NONE;
++        GLES.glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, old,
++                                                   GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
++        if (type != GL_NONE) {
++            FB_WARN_ONCE("glDrawBuffers: attachment state created outside MobileGlues cannot be relocated");
++            mg_set_gl_error(GL_INVALID_OPERATION);
++            return false;
++        }
++        fbo.color_attachments[i] = {attach_kind_t::Texture2D, GL_TEXTURE_2D, 0, 0, 0};
++    }
++    for (size_t i = 0; i < count; ++i) {
++        if (mapped_attachment(fbo, GL_COLOR_ATTACHMENT0 + i) != map[i])
++            reattach(GL_DRAW_FRAMEBUFFER, map[i], fbo.color_attachments[i]);
++    }
++    fbo.draw_buffer_map = identity ? std::vector<GLenum>{} : std::move(map);
++    set_backend_read_buffer(current_draw_fbo, fbo);
++    return true;
++}
++
+ void glDrawBuffer(GLenum buffer) {
+-    LOG()
+-    LOG_D("glDrawBuffer %d", buffer)
+-
+-    //    GLint currentFBO;
+-    //    GLES.glGetIntegerv(GL_FRAMEBUFFER_BINDING, &currentFBO);
+-    if (current_draw_fbo == 0) {
+-        GLenum buffers[] = {buffer};
+-        glDrawBuffers(1, buffers);
++    ensure_max_attachments();
++    if (g_fc->logical_draw == 0 && window_buffer(buffer)) {
++        const GLenum physical = current_draw_fbo == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0;
++        GLES.glDrawBuffers(1, &physical);
++        auto& fbo = get_framebuffer(0);
++        fbo.draw_buffers.assign(1, buffer);
++        fbo.color_attachments_all_none = false;
++        if (current_draw_fbo != 0) get_framebuffer(current_draw_fbo).color_attachments_all_none = false;
++        return;
++    }
++    if (window_buffer(buffer) || buffer == GL_FRONT_RIGHT || buffer == GL_BACK_RIGHT || buffer == GL_RIGHT) {
++        mg_set_gl_error(GL_INVALID_OPERATION);
++        return;
++    }
++    if (color_attachment_enum(buffer) &&
++        (g_fc->logical_draw == 0 || buffer >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)) {
++        mg_set_gl_error(GL_INVALID_OPERATION);
++        return;
++    }
++    glDrawBuffers(1, &buffer);
++}
++
++void glDrawBuffers(GLsizei n, const GLenum* bufs) {
++    ensure_max_attachments();
++    if (n < 0 || n > MAX_DRAW_BUFFERS) {
++        mg_set_gl_error(GL_INVALID_VALUE);
++        return;
++    }
++    if (n > 0 && bufs == nullptr) {
++        mg_set_gl_error(GL_INVALID_VALUE);
++        return;
++    }
++    const bool window = g_fc->logical_draw == 0;
++    for (GLsizei i = 0; i < n; ++i) {
++        const GLenum value = bufs[i];
++        if (value == GL_NONE) continue;
++        if (window) {
++            if (value != GL_BACK && value != GL_BACK_LEFT && value != GL_FRONT_LEFT &&
++                value != GL_BACK_RIGHT && value != GL_FRONT_RIGHT) {
++                mg_set_gl_error(color_attachment_enum(value) ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
++                return;
++            }
++            if (i != 0 || (value == GL_BACK && n != 1) || value == GL_BACK_RIGHT || value == GL_FRONT_RIGHT) {
++                mg_set_gl_error(GL_INVALID_OPERATION);
++                return;
++            }
++        } else if (value < GL_COLOR_ATTACHMENT0 || value >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS) {
++            const bool known = color_attachment_enum(value) || value == GL_BACK || value == GL_BACK_LEFT ||
++                               value == GL_FRONT_LEFT || value == GL_BACK_RIGHT || value == GL_FRONT_RIGHT;
++            mg_set_gl_error(known ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
++            return;
++        }
++        for (GLsizei j = 0; j < i; ++j) {
++            if (bufs[j] == value) {
++                mg_set_gl_error(GL_INVALID_OPERATION);
++                return;
++            }
++        }
++    }
++    auto& fbo = get_framebuffer(g_fc->logical_draw);
++    std::vector<GLenum> physical(n, GL_NONE);
++    bool all_none = true;
++    for (GLsizei i = 0; i < n; ++i) {
++        if (bufs[i] == GL_NONE) continue;
++        all_none = false;
++        physical[i] = window && current_draw_fbo == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0 + i;
++    }
++    if (!window) {
++        init_framebuffer(fbo);
++        if (!arrange_draw_buffers(fbo, n, bufs)) return;
++    }
++    if (window && current_draw_fbo == 0) {
++        const GLenum back = n == 0 ? GL_NONE : physical[0];
++        GLES.glDrawBuffers(1, &back);
+     } else {
+-        // Under the FSR1 redirect the application still believes it is drawing to
+-        // the window, so it names the window's buffers -- but the binding really
+-        // is an FBO, whose only colour buffer is attachment 0. GL_BACK matched
+-        // neither GL_NONE nor the attachment range below, so the call emitted
+-        // nothing whatsoever and an earlier glDrawBuffer(GL_NONE) could never be
+-        // undone.
+-        if (current_draw_fbo == FSR1_Context::g_renderFBO &&
+-            (buffer == GL_BACK || buffer == GL_FRONT || buffer == GL_FRONT_AND_BACK || buffer == GL_LEFT ||
+-             buffer == GL_BACK_LEFT || buffer == GL_FRONT_LEFT)) {
+-            LOG_D("glDrawBuffer 0x%x on the FSR1 target -> GL_COLOR_ATTACHMENT0", buffer)
+-            buffer = GL_COLOR_ATTACHMENT0;
+-        }
+-        // The cached value, not a driver round trip on every call -- and the same
+-        // one the rest of this file uses, so the two cannot disagree about how
+-        // many attachments there are.
+-        const GLint maxAttachments = max_color_attachments_or_default();
+-
+-        if (buffer == GL_NONE) {
+-            get_framebuffer(current_draw_fbo).color_attachments_all_none = true;
+-            std::vector<GLenum> buffers(maxAttachments, GL_NONE);
+-            glDrawBuffers(maxAttachments, buffers.data());
+-        } else if (buffer >= GL_COLOR_ATTACHMENT0 && buffer < GL_COLOR_ATTACHMENT0 + maxAttachments) {
+-            get_framebuffer(current_draw_fbo).color_attachments_all_none = false;
+-            std::vector<GLenum> buffers(maxAttachments, GL_NONE);
+-            buffers[buffer - GL_COLOR_ATTACHMENT0] = buffer;
+-            glDrawBuffers(maxAttachments, buffers.data());
+-        }
+-    }
+-    CHECK_GL_ERROR;
+-}
+-void glDrawBuffers(GLsizei n, const GLenum* bufs) {
+-    LOG()
+-    if (current_draw_fbo == 0) {
+-        GLES.glDrawBuffers(n, bufs);
+-        return;
+-    }
+-
+-    framebuffer_t& fbo = get_framebuffer(current_draw_fbo);
+-    init_framebuffer(fbo);
+-
+-    bool all_none = true;
+-    for (int i = 0; i < n; ++i) {
+-        if (bufs[i] != GL_NONE) {
+-            all_none = false;
+-            break;
+-        }
+-    }
+-
+-    if (all_none) {
+-        LOG_D("glDrawBuffers, fb %d all_none true", current_draw_fbo)
+-        fbo.color_attachments_all_none = true;
+-        GLES.glDrawBuffers(n, bufs);
+-        return;
++        GLES.glDrawBuffers(n, physical.data());
++    }
++    fbo.draw_buffers.clear();
++    if (n > 0) fbo.draw_buffers.assign(bufs, bufs + n);
++    fbo.color_attachments_all_none = all_none;
++    if (window && current_draw_fbo != 0) get_framebuffer(current_draw_fbo).color_attachments_all_none = all_none;
++}
++
++void glReadBuffer(GLenum src) {
++    ensure_max_attachments();
++    GLenum physical = src;
++    if (current_read_fbo == 0) {
++        if (src != GL_NONE && !window_buffer(src)) {
++            mg_set_gl_error(src == GL_FRONT_RIGHT || src == GL_BACK_RIGHT || src == GL_RIGHT || color_attachment_enum(src)
++                            ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
++            return;
++        }
++        physical = src == GL_NONE ? GL_NONE : GL_BACK;
++    } else if (src != GL_NONE && (src < GL_COLOR_ATTACHMENT0 || src >= GL_COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS)) {
++        mg_set_gl_error(color_attachment_enum(src) || window_buffer(src) || src == GL_FRONT_RIGHT ||
++                        src == GL_BACK_RIGHT || src == GL_RIGHT ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
++        return;
++    }
++    auto& fbo = get_framebuffer(current_read_fbo);
++    fbo.read_buffer = src;
++    GLES.glReadBuffer(mapped_attachment(fbo, physical));
++}
++
++static bool default_attachment_parameter(GLenum pname) {
++    switch (pname) {
++    case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
++    case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
++    case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
++        return true;
++    default:
++        return false;
++    }
++}
++
++static void query_default_attachment(GLenum target, GLenum attachment, GLenum pname, GLint* params, bool fsr) {
++    GLenum physical = attachment;
++    switch (attachment) {
++    case GL_BACK_LEFT:
++    case GL_FRONT_LEFT:
++        physical = fsr ? GL_COLOR_ATTACHMENT0 : GL_BACK;
++        break;
++    case GL_DEPTH:
++        physical = fsr ? GL_DEPTH_ATTACHMENT : GL_DEPTH;
++        break;
++    case GL_STENCIL:
++        physical = fsr ? GL_STENCIL_ATTACHMENT : GL_STENCIL;
++        break;
++    case GL_BACK_RIGHT:
++    case GL_FRONT_RIGHT:
++        if (pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE || pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME)
++            *params = GL_NONE;
++        else
++            mg_set_gl_error(GL_INVALID_OPERATION);
++        return;
++    default:
++        mg_set_gl_error(GL_INVALID_OPERATION);
++        return;
++    }
++    GLint type = GL_NONE;
++    GLES.glGetFramebufferAttachmentParameteriv(target, physical, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
++    if (pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
++        *params = type == GL_NONE ? GL_NONE : GL_FRAMEBUFFER_DEFAULT;
++    } else if (type == GL_NONE) {
++        if (pname == GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) *params = 0;
++        else mg_set_gl_error(GL_INVALID_OPERATION);
++    } else if (default_attachment_parameter(pname)) {
++        GLES.glGetFramebufferAttachmentParameteriv(target, physical, pname, params);
+     } else {
+-        LOG_D("glDrawBuffers, fb %d all_none false", current_draw_fbo)
+-        fbo.color_attachments_all_none = false;
+-    }
+-
+-    // Attachment i already in slot i is the only arrangement GLES accepts, so
+-    // there is nothing to move -- and this is what applications ask for almost
+-    // every time. Moving it anyway is how a renderbuffer or layered attachment,
+-    // which this table cannot describe, used to get detached by a call that
+-    // should have been a no-op.
+-    bool identity = true;
+-    for (int i = 0; i < n; i++) {
+-        if (bufs[i] != GL_COLOR_ATTACHMENT0 + (GLenum)i) {
+-            identity = false;
+-            break;
+-        }
+-    }
+-    if (identity) {
+-        LOG_D("glDrawBuffers, fb %d identity order, nothing to move", current_draw_fbo)
+-        restore_home_attachments(fbo);
+-        GLES.glDrawBuffers(n, bufs);
+-        return;
+-    }
+-
+-    // A real shuffle. Every attachment it has to move must be one this layer
+-    // recorded -- an unrecorded one is either genuinely empty or attached through
+-    // a path that does not reach update_attachment, and "re-attaching" its zeroed
+-    // record would detach whatever is really there.
+-    for (int i = 0; i < n; i++) {
+-        if (bufs[i] < GL_COLOR_ATTACHMENT0 || bufs[i] >= GL_COLOR_ATTACHMENT0 + (GLenum)max_color_attachments_or_default()) continue;
+-        if (bufs[i] - GL_COLOR_ATTACHMENT0 >= fbo.color_attachments.size()) continue;
+-        if (fbo.color_attachments[bufs[i] - GL_COLOR_ATTACHMENT0].kind != attach_kind_t::None) continue;
+-        // Passed through unchanged instead. GLES rejects a non-identity draw
+-        // buffer list, so the application gets GL_INVALID_OPERATION -- which is
+-        // both true and something it can now see -- rather than a framebuffer that
+-        // quietly lost an attachment.
+-        FB_WARN_ONCE("glDrawBuffers: fb %u wants attachment %u in slot %d but nothing is recorded there; "
+-                     "passing the list through rather than detaching it",
+-                     current_draw_fbo, bufs[i] - GL_COLOR_ATTACHMENT0, i);
+-        restore_home_attachments(fbo);
+-        GLES.glDrawBuffers(n, bufs);
+-        return;
+-    }
+-
+-    // Undo whatever the last shuffle did before arranging a new one. Overwriting
+-    // the map with assign() below discards the record of where the previous
+-    // shuffle put things while the driver still has them there, so any slot the
+-    // old shuffle moved and the new one does not name would be stranded with no
+-    // way left to find it.
+-    restore_home_attachments(fbo);
+-
+-    std::vector<GLenum> new_bufs(n);
+-    fbo.draw_buffer_map.assign(max_color_attachments_or_default(), 0);
+-    for (int i = 0; i < n; i++) {
+-        if (bufs[i] >= GL_COLOR_ATTACHMENT0 && bufs[i] < GL_COLOR_ATTACHMENT0 + (GLenum)max_color_attachments_or_default()) {
+-            GLenum logical_attachment = bufs[i];
+-            GLenum physical_attachment = GL_COLOR_ATTACHMENT0 + i;
+-            new_bufs[i] = physical_attachment;
+-            size_t index = logical_attachment - GL_COLOR_ATTACHMENT0;
+-            if (index >= fbo.color_attachments.size() || index >= fbo.draw_buffer_map.size()) {
+-                new_bufs[i] = bufs[i];
+-                continue;
+-            }
+-            reattach(GL_DRAW_FRAMEBUFFER, physical_attachment, fbo.color_attachments[index]);
+-            // Remember where it went, so glReadBuffer can read it where it is
+-            // rather than moving it a second time.
+-            fbo.draw_buffer_map[index] = physical_attachment;
++        mg_set_gl_error(GL_INVALID_ENUM);
++    }
++}
++
++void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params) {
++    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
++        mg_set_gl_error(GL_INVALID_ENUM);
++        return;
++    }
++    const GLuint id = target == GL_READ_FRAMEBUFFER ? current_read_fbo : g_fc->logical_draw;
++    if (id == 0) {
++        if (target == GL_READ_FRAMEBUFFER) {
++            mg_fsr_read_scope_t scope;
++            query_default_attachment(target, attachment, pname, params, FSR1_Context::g_renderFBO != 0);
+         } else {
+-            new_bufs[i] = bufs[i];
+-        }
+-    }
+-    GLES.glDrawBuffers(n, new_bufs.data());
+-}
+-void glReadBuffer(GLenum src) {
+-    if (current_read_fbo != 0 && src >= GL_COLOR_ATTACHMENT0 && src < GL_COLOR_ATTACHMENT0 + max_color_attachments_or_default()) {
+-        framebuffer_t& fbo = get_framebuffer(current_read_fbo);
+-        init_framebuffer(fbo);
+-        const size_t index = static_cast<size_t>(src - GL_COLOR_ATTACHMENT0);
+-        // glDrawBuffers has to move logical attachment i onto physical
+-        // GL_COLOR_ATTACHMENTi, because GLES only accepts COLOR_ATTACHMENTi in slot
+-        // i of the draw buffer list. After such a shuffle the texture the
+-        // application calls attachment n is somewhere else, so read it there.
+-        //
+-        // This used to re-attach it onto GL_COLOR_ATTACHMENT0 instead, which
+-        // destroyed whatever was on attachment 0 -- and did so even for a
+-        // framebuffer that had never been shuffled, and even when the record was
+-        // empty because the application had attached with glFramebufferRenderbuffer
+-        // or one of the layered entry points, which do not reach update_attachment.
+-        // Reading where the texture already is moves nothing and cannot clobber.
+-        if (index < fbo.draw_buffer_map.size() && fbo.draw_buffer_map[index] != 0) {
+-            GLES.glReadBuffer(fbo.draw_buffer_map[index]);
+-            return;
+-        }
+-    }
+-    GLES.glReadBuffer(src);
++            query_default_attachment(target, attachment, pname, params, current_draw_fbo != 0);
++        }
++        return;
++    }
++    const auto it = framebuffers.find(id);
++    if (it != framebuffers.end() && it->second) attachment = mapped_attachment(*it->second, attachment);
++    GLES.glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
+ }
+ GLenum glCheckFramebufferStatus(GLenum target) {
+     GLenum status = GLES.glCheckFramebufferStatus(target);
+@@ -564,4 +682,4 @@
+         return GL_FRAMEBUFFER_COMPLETE;
+     }
+     return status;
+-}
+\ No newline at end of file
++}
+--- a/MobileGlues-cpp/gl/framebuffer.h
++++ b/MobileGlues-cpp/gl/framebuffer.h
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: logical framebuffer routing.
+ // MobileGlues - gl/framebuffer.h
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -12,14 +13,6 @@
+ #include <GL/gl.h>
+ #include <cstddef>
+ 
+-// How an attachment got attached, so the draw-buffer shuffle can put it back the
+-// same way.
+-//
+-// There used to be no such field, and the shuffle assumed every attachment had
+-// arrived through glFramebufferTexture2D. Everything else -- renderbuffers,
+-// layered attachments -- left the record at all zeros, and re-attaching a zero
+-// record is a detach: a framebuffer whose colour attachment was a renderbuffer
+-// lost it the first time the application called glDrawBuffers.
+ enum class attach_kind_t : unsigned char {
+     None = 0,      // nothing recorded; may still be attached by a path this layer does not see
+     Texture2D,     // glFramebufferTexture2D
+@@ -38,21 +31,11 @@
+ struct framebuffer_t {
+     bool initialized = false;
+     bool color_attachments_all_none = false;
+-    // A vector rather than a raw new[]: these records live in a std::vector that
+-    // reallocates as framebuffer names grow, and the struct has no destructor or
+-    // copy control, so an owning raw pointer here both leaked every array it ever
+-    // allocated and made the type unsafe to copy. Indexing syntax is unchanged.
+     std::vector<attachment_t> color_attachments;
+-    // Where glDrawBuffers physically put each logical colour attachment. GLES only
+-    // accepts GL_COLOR_ATTACHMENTi in slot i of the draw buffer list, so a shuffled
+-    // glDrawBuffers has to re-attach; this records the result so a later
+-    // glReadBuffer can find the texture instead of moving it again. Empty means no
+-    // shuffle is in effect and every attachment is where the application put it.
++    // Logical attachment -> physical point; empty is identity.
+     std::vector<GLenum> draw_buffer_map;
+-    // No depth_attachment / stencil_attachment. They were written and never read
+-    // by anything in the tree, and the branch that filled them did not recognise
+-    // GL_DEPTH_STENCIL_ATTACHMENT -- the usual way to attach depth -- so the one
+-    // consumer that might have wanted them would have found them empty anyway.
++    std::vector<GLenum> draw_buffers = {GL_COLOR_ATTACHMENT0};
++    GLenum read_buffer = GL_COLOR_ATTACHMENT0;
+ };
+ 
+ #ifdef __cplusplus
+@@ -77,12 +60,22 @@
+     GLAPI GLAPIENTRY void glDrawBuffers(GLsizei n, const GLenum* bufs);
+     GLAPI GLAPIENTRY void glReadBuffer(GLenum src);
+     GLAPI GLAPIENTRY GLenum glCheckFramebufferStatus(GLenum target);
++    GLAPI GLAPIENTRY void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname,
++                                                               GLint* params);
+ 
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+ void InitFramebufferMap(size_t expectedSize);
++
++bool mg_get_framebuffer_binding_parameter(GLenum pname, GLint* value);
++struct mg_framebuffer_snapshot {
++    GLuint draw_fbo, read_fbo;
++    GLenum draw_buffers[4];
++    GLenum color_attachments[4];
++};
++void mg_get_framebuffer_snapshot(mg_framebuffer_snapshot* snapshot);
+ 
+ // The framebuffer table of the current context. It used to be a plain global
+ // that gl/gl.cpp reached by extern; it is per-context now, so it has to be
 --- a/MobileGlues-cpp/gl/getter.cpp
 +++ b/MobileGlues-cpp/gl/getter.cpp
 @@ -1,3 +1,4 @@
-+// Modified for FCL Quest VR on 2026-10-31: shader-source API correctness and error handling.
++// Modified for FCL Quest VR on 2026-11-13: opt-in error diagnostics and texture limits.
  // MobileGlues - gl/getter.cpp
  // Copyright (c) 2025-2026 MobileGL-Dev
  // Licensed under the GNU Lesser General Public License v2.1:
-@@ -19,6 +20,7 @@
+@@ -9,16 +10,20 @@
+ #include "enable.h"
+ #include "../egl/context.h"
+ #include "buffer.h"
++#include "framebuffer.h"
+ #include "texture.h"
+ #include <string>
+ #include <format>
+ #include <vector>
+ #include <random>
++#include <cstdlib>
++#include <cstring>
+ #include "FSR1/FSR1.h"
+ #include "log.h"
  #include "mg.h"
  #include "pixel.h"
  #include "random_string_gen.h"
@@ -57,37 +1593,206 @@
  #include "../config/settings.h"
  
  #define DEBUG 0
-@@ -182,13 +184,21 @@
+@@ -26,22 +31,66 @@
+ Version GLVersion;
+ 
+ namespace {
+-// See mg_set_gl_error in gl/mg.h for why this exists and why it is per thread.
+-thread_local GLenum g_frontend_error = GL_NO_ERROR;
++thread_local GLenum fallback_frontend_error = GL_NO_ERROR;
++thread_local GLbitfield fallback_backend_errors = 0;
++
++GLenum& frontend_error_slot() {
++    return g_current_ctx ? g_current_ctx->frontend_error : fallback_frontend_error;
++}
++
++GLbitfield& backend_error_slots() {
++    return g_current_ctx ? g_current_ctx->preserved_backend_errors : fallback_backend_errors;
++}
++
++GLenum take_preserved_backend_error() {
++    GLbitfield& flags = backend_error_slots();
++    for (unsigned i = 0; i < 8; ++i) {
++        if ((flags & (1u << i)) != 0) {
++            flags &= ~(1u << i);
++            return GL_INVALID_ENUM + i;
++        }
++    }
++    return GL_NO_ERROR;
++}
+ } // namespace
++
++bool mg_strict_errors_enabled() {
++    static const bool enabled = [] {
++        const char* value = std::getenv("MG_STRICT_ERRORS");
++        return value && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++}
++
++GLenum mg_read_backend_error() {
++    const GLenum error = GLES.glGetError();
++    if (mg_strict_errors_enabled() && error >= GL_INVALID_ENUM && error <= GL_CONTEXT_LOST) {
++        backend_error_slots() |= 1u << (error - GL_INVALID_ENUM);
++    }
++    return error;
++}
+ 
+ void mg_set_gl_error(GLenum error) {
+     if (error == GL_NO_ERROR) return;
+-    // First error wins. A later, vaguer failure must not paper over the one that
+-    // actually explains what the application did wrong.
+-    if (g_frontend_error != GL_NO_ERROR) return;
+-    g_frontend_error = error;
++    GLenum& slot = frontend_error_slot();
++    if (slot != GL_NO_ERROR) return;
++    slot = error;
+     LOG_D("MobileGlues raised %s", glEnumToString(error))
++}
++
++bool mg_query_texture_unit_limit(GLenum pname, GLint* value) {
++    if (pname != GL_MAX_TEXTURE_IMAGE_UNITS && pname != GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS) return false;
++    GLint backend = 0;
++    GLES.glGetIntegerv(pname, &backend);
++    const GLint tracked = mg_max_texture_units();
++    *value = backend < tracked ? backend : tracked;
++    return true;
+ }
+ 
+ void glGetIntegerv(GLenum pname, GLint* params) {
+     LOG()
+     LOG_D("glGetIntegerv, pname: %s", glEnumToString(pname))
++    if (mg_query_texture_unit_limit(pname, params) || mg_get_framebuffer_binding_parameter(pname, params)) return;
+     switch (pname) {
+     case GL_NUM_EXTENSIONS + GL_BACKEND_GETTER_MG:
+         GLES.glGetIntegerv(pname - GL_BACKEND_GETTER_MG, params);
+@@ -94,27 +143,6 @@
+             (*params) = GLVersion.Minor;
+         }
+         break;
+-    case GL_MAX_TEXTURE_IMAGE_UNITS: {
+-        int es_params = 16;
+-        GLES.glGetIntegerv(pname, &es_params);
+-        CHECK_GL_ERROR(*params) = es_params * 2;
+-        // Why is the real GL_MAX_TEXTURE_IMAGE_UNITS bigger than what GLES.glGetIntegerv returns?
+-        break;
+-    }
+-    case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: {
+-        // This is the bound on glActiveTexture, and drivers report generously --
+-        // Mali-G77 says 96. Forwarding it unchanged promised more units than the
+-        // layer keeps bindings for, and the units past the end were accepted by
+-        // the driver but dropped here, so a glBindTexture after one of them went
+-        // to the wrong unit with nothing reporting it. Promise only what
+-        // gl/texture.cpp can actually track.
+-        int es_params = 32;
+-        GLES.glGetIntegerv(pname, &es_params);
+-        CHECK_GL_ERROR
+-        const int tracked = mg_max_texture_units();
+-        (*params) = es_params < tracked ? es_params : tracked;
+-        break;
+-    }
+     case GL_CONTEXT_FLAGS: {
+         // Reported from what the context was actually created with. Claiming
+         // flags the application never asked for -- as this did before it was
+@@ -182,25 +210,21 @@
  
  GLenum glGetError() {
      LOG()
+-    // Both are consumed whether or not they get reported: leaving either latched
+-    // would hand it to a later, unrelated glGetError.
 +    const GLenum shader_error = mg_take_shader_source_error();
 +    if (shader_error != GL_NO_ERROR) {
-+        // Do not read either pre-existing error channel while returning this
-+        // error. In particular, GLES.glGetError() would consume a driver error
-+        // unrelated to the rejected shader submission.
-+        return global_settings.ignore_error == IgnoreErrorLevel::None ? shader_error : GL_NO_ERROR;
++        return mg_strict_errors_enabled() || global_settings.ignore_error == IgnoreErrorLevel::None
++            ? shader_error : GL_NO_ERROR;
 +    }
-     // Both are consumed whether or not they get reported: leaving either latched
-     // would hand it to a later, unrelated glGetError.
++    GLenum& frontend_slot = frontend_error_slot();
++    const GLenum frontend = frontend_slot;
++    frontend_slot = GL_NO_ERROR;
++    if (mg_strict_errors_enabled()) {
++        if (frontend != GL_NO_ERROR) return frontend;
++        const GLenum preserved = take_preserved_backend_error();
++        if (preserved != GL_NO_ERROR) return preserved;
++        return GLES.glGetError();
++    }
      const GLenum backend = GLES.glGetError();
-     const GLenum frontend = g_frontend_error;
-     g_frontend_error = GL_NO_ERROR;
- 
+-    const GLenum frontend = g_frontend_error;
+-    g_frontend_error = GL_NO_ERROR;
+-
 -    // GL_NO_ERROR, always, in every configuration and whatever ignoreError says.
-+    // Preserve the legacy GL_NO_ERROR policy for unrelated frontend/backend
-+    // errors. The strict shader-submission channel above is handled separately.
-     //
-     // Deliberate, and not the same thing as not knowing. This layer emulates
-     // enough of desktop GL on top of GLES that a faithfully forwarded error is
+-    //
+-    // Deliberate, and not the same thing as not knowing. This layer emulates
+-    // enough of desktop GL on top of GLES that a faithfully forwarded error is
+-    // more often an artefact of how a call had to be translated than something the
+-    // application got wrong -- and hosts treat errors as fatal or fall back to
+-    // slower paths on them. One example from inside this very library:
+-    // gl/buffer.cpp's glMapBuffer asks glGetError and returns nullptr if it is
+-    // not clear, a branch that only stays dead because of this.
+-    //
+-    // What the errors are still for is the log. Every path that raises one names
+-    // itself right next to the call, so a quiet failure is diagnosable from a
+-    // logcat even though the application will never be told.
+     const GLenum swallowed = frontend != GL_NO_ERROR ? frontend : backend;
+     if (swallowed != GL_NO_ERROR) {
+         LOG_W("glGetError -> %s, reported to the application as GL_NO_ERROR", glEnumToString(swallowed))
+--- a/MobileGlues-cpp/gl/gl.cpp
++++ b/MobileGlues-cpp/gl/gl.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-11: desktop depth range and safe depth conversion.
+ // MobileGlues - gl/gl.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -14,6 +15,7 @@
+ #include "../config/settings.h"
+ #include "mg.h"
+ #include "framebuffer.h"
++#include "backend_diagnostics.h"
+ #include "../egl/context.h"
+ #include <mutex>
+ #include <memory>
+@@ -25,10 +27,25 @@
+ 
+ #include "framebuffer.h"
+ 
++static GLfloat clamp_depth_value(GLclampd value) {
++    if (value < 0.0) return 0.0f;
++    if (value > 1.0) return 1.0f;
++    return static_cast<GLfloat>(value);
++}
++
++void glDepthRange(GLclampd near_val, GLclampd far_val) {
++    LOG()
++    const GLfloat near_depth = clamp_depth_value(near_val);
++    const GLfloat far_depth = clamp_depth_value(far_val);
++    GLES.glDepthRangef(near_depth, far_depth);
++    if (near_depth != 0.0f || far_depth != 1.0f) mg_backend_diag_arm();
++    CHECK_GL_ERROR
++}
++
+ void glClearDepth(GLclampd depth) {
+     LOG()
+     currentDepthValue = depth;
+-    GLES.glClearDepthf((float)depth);
++    GLES.glClearDepthf(clamp_depth_value(depth));
+     CHECK_GL_ERROR
+ }
+ 
 --- a/MobileGlues-cpp/gl/gl_native.cpp
 +++ b/MobileGlues-cpp/gl/gl_native.cpp
 @@ -1,3 +1,4 @@
-+// Modified for FCL Quest VR on 2026-11-06: track shader-default lifetimes.
++// Modified for FCL Quest VR on 2026-11-13: desktop framebuffer queries and backend diagnostics.
  // MobileGlues - gl/gl_native.cpp
  // Copyright (c) 2025-2026 MobileGL-Dev
  // Licensed under the GNU Lesser General Public License v2.1:
-@@ -35,7 +36,6 @@
+@@ -9,6 +10,8 @@
+ #include <GL/gl.h>
+ #include "glcorearb.h"
+ #include "log.h"
++#include "backend_diagnostics.h"
++#include "srgb_mipmap.h"
+ #include "../gles/loader.h"
+ #include "mg.h"
+ #include <GLES3/gl32.h>
+@@ -35,7 +38,6 @@
  NATIVE_FUNCTION_HEAD(void, glClearDepthf, GLfloat d) NATIVE_FUNCTION_END_NO_RETURN(void, glClearDepthf, d)
  NATIVE_FUNCTION_HEAD(void, glClearStencil, GLint s) NATIVE_FUNCTION_END_NO_RETURN(void, glClearStencil, s)
  NATIVE_FUNCTION_HEAD(void, glColorMask, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) NATIVE_FUNCTION_END_NO_RETURN(void, glColorMask, red,green,blue,alpha)
@@ -95,7 +1800,7 @@
  NATIVE_FUNCTION_HEAD(void, glCompressedTexImage2D, GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glCompressedTexImage2D, target,level,internalformat,width,height,border,imageSize,data)
  NATIVE_FUNCTION_HEAD(void, glCompressedTexSubImage2D, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data) NATIVE_FUNCTION_END_NO_RETURN(void, glCompressedTexSubImage2D, target,level,xoffset,yoffset,width,height,format,imageSize,data)
  //NATIVE_FUNCTION_HEAD(void, glCopyTexImage2D, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) NATIVE_FUNCTION_END_NO_RETURN(void, glCopyTexImage2D, target,level,internalformat,x,y,width,height,border)
-@@ -45,14 +45,11 @@
+@@ -45,17 +47,19 @@
  NATIVE_FUNCTION_HEAD(void, glCullFace, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glCullFace, mode)
  //NATIVE_FUNCTION_HEAD(void, glDeleteBuffers, GLsizei n, const GLuint *buffers) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteBuffers, n,buffers)
  // NATIVE_FUNCTION_HEAD(void, glDeleteFramebuffers, GLsizei n, const GLuint *framebuffers) NATIVE_FUNCTION_END_NO_RETURN(void, glDeleteFramebuffers, n,framebuffers)   // implemented in gl/framebuffer.cpp
@@ -109,7 +1814,114 @@
 -NATIVE_FUNCTION_HEAD(void, glDetachShader, GLuint program, GLuint shader) NATIVE_FUNCTION_END_NO_RETURN(void, glDetachShader, program,shader)
  // NATIVE_FUNCTION_HEAD(void, glDisable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glDisable, cap)   // moved to gl/enable.cpp (virtual enable state table)
  NATIVE_FUNCTION_HEAD(void, glDisableVertexAttribArray, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glDisableVertexAttribArray, index)
- NATIVE_FUNCTION_HEAD(void, glDrawArrays, GLenum mode, GLint first, GLsizei count) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawArrays, mode,first,count)
+-NATIVE_FUNCTION_HEAD(void, glDrawArrays, GLenum mode, GLint first, GLsizei count) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawArrays, mode,first,count)
++NATIVE_FUNCTION_HEAD(void, glDrawArrays, GLenum mode, GLint first, GLsizei count)
++    mg_backend_diagnostic diagnostic(mg_backend_diag_kind::draw, "glDrawArrays", mode, count);
++    GLES.glDrawArrays(mode, first, count);
++    diagnostic.finish();
++    CHECK_GL_ERROR
++}
+ //NATIVE_FUNCTION_HEAD(void, glDrawElements, GLenum mode, GLsizei count, GLenum type, const void *indices) NATIVE_FUNCTION_END_NO_RETURN(void, glDrawElements, mode,count,type,indices)
+ // NATIVE_FUNCTION_HEAD(void, glEnable, GLenum cap) NATIVE_FUNCTION_END_NO_RETURN(void, glEnable, cap)   // moved to gl/enable.cpp (virtual enable state table)
+ NATIVE_FUNCTION_HEAD(void, glEnableVertexAttribArray, GLuint index) NATIVE_FUNCTION_END_NO_RETURN(void, glEnableVertexAttribArray, index)
+@@ -65,7 +69,9 @@
+ //NATIVE_FUNCTION_HEAD(void, glFramebufferTexture2D, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) NATIVE_FUNCTION_END_NO_RETURN(void, glFramebufferTexture2D, target,attachment,textarget,texture,level)
+ NATIVE_FUNCTION_HEAD(void, glFrontFace, GLenum mode) NATIVE_FUNCTION_END_NO_RETURN(void, glFrontFace, mode)
+ //NATIVE_FUNCTION_HEAD(void, glGenBuffers, GLsizei n, GLuint *buffers) NATIVE_FUNCTION_END_NO_RETURN(void, glGenBuffers, n,buffers)
+-NATIVE_FUNCTION_HEAD(void, glGenerateMipmap, GLenum target) NATIVE_FUNCTION_END_NO_RETURN(void, glGenerateMipmap, target)
++NATIVE_FUNCTION_HEAD(void, glGenerateMipmap, GLenum target)
++    if (!mg_generate_srgb_mipmap(target)) GLES.glGenerateMipmap(target);
++}
+ NATIVE_FUNCTION_HEAD(void, glGenFramebuffers, GLsizei n, GLuint *framebuffers) NATIVE_FUNCTION_END_NO_RETURN(void, glGenFramebuffers, n,framebuffers)
+ NATIVE_FUNCTION_HEAD(void, glGenRenderbuffers, GLsizei n, GLuint *renderbuffers) NATIVE_FUNCTION_END_NO_RETURN(void, glGenRenderbuffers, n,renderbuffers)
+ NATIVE_FUNCTION_HEAD(void, glGenTextures, GLsizei n, GLuint *textures) NATIVE_FUNCTION_END_NO_RETURN(void, glGenTextures, n,textures)
+@@ -77,7 +83,6 @@
+ // NATIVE_FUNCTION_HEAD(void, glGetBufferParameteriv, GLenum target, GLenum pname, GLint *params) NATIVE_FUNCTION_END_NO_RETURN(void, glGetBufferParameteriv, target,pname,params)   // moved to gl/buffer.cpp so GL_PARAMETER_BUFFER reaches a target GLES understands
+ //NATIVE_FUNCTION_HEAD(GLenum, glGetError) NATIVE_FUNCTION_END(GLenum, glGetError)
+ // NATIVE_FUNCTION_HEAD(void, glGetFloatv, GLenum pname, GLfloat *data) NATIVE_FUNCTION_END_NO_RETURN(void, glGetFloatv, pname,data)   // moved to gl/enable.cpp so it agrees with glIsEnabled
+-NATIVE_FUNCTION_HEAD(void, glGetFramebufferAttachmentParameteriv, GLenum target, GLenum attachment, GLenum pname, GLint *params) NATIVE_FUNCTION_END_NO_RETURN(void, glGetFramebufferAttachmentParameteriv, target,attachment,pname,params)
+ //NATIVE_FUNCTION_HEAD(void, glGetIntegerv, GLenum pname, GLint *data) NATIVE_FUNCTION_END_NO_RETURN(void, glGetIntegerv, pname,data)
+ //NATIVE_FUNCTION_HEAD(void, glGetProgramiv, GLuint program, GLenum pname, GLint *params) NATIVE_FUNCTION_END_NO_RETURN(void, glGetProgramiv, program,pname,params)
+ NATIVE_FUNCTION_HEAD(void, glGetProgramInfoLog, GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog) NATIVE_FUNCTION_END_NO_RETURN(void, glGetProgramInfoLog, program,bufSize,length,infoLog)
+--- a/MobileGlues-cpp/gl/gl_stub.cpp
++++ b/MobileGlues-cpp/gl/gl_stub.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-11: remove the no-op desktop depth range entry point.
+ // MobileGlues - gl/gl_stub.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -45,11 +46,6 @@
+ STUB_FUNCTION_HEAD(void, glPopClientAttrib) STUB_FUNCTION_END_NO_RETURN(void, glPopClientAttrib)
+ STUB_FUNCTION_HEAD(GLint, glRenderMode, GLenum mode) STUB_FUNCTION_END(GLint, glRenderMode,mode)
+ 
+-/*
+-* Depth Buffer
+-*/
+-
+-STUB_FUNCTION_HEAD(void, glDepthRange, GLclampd near_val, GLclampd far_val ) STUB_FUNCTION_END_NO_RETURN(void, glDepthRange, near_val, far_val)
+ /*
+ * Accumulation Buffer
+ */
+--- a/MobileGlues-cpp/gl/mg.h
++++ b/MobileGlues-cpp/gl/mg.h
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: opt-in error diagnostics and shared limit queries.
+ // MobileGlues - gl/mg.h
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -114,19 +115,12 @@
+     // address zero.
+     extern thread_local gl_state_t gl_state;
+ 
+-    // Raise one of this layer's own GL errors, latched until the next glGetError.
+-    //
+-    // A call this layer rejects by itself -- a readback target it cannot emulate,
+-    // a texture name it has no record of, a buffer size that would overflow --
+-    // never reaches the driver, so there is no backend error for glGetError to
+-    // find. Those paths used to just return, handing the application back an
+-    // untouched buffer and GL_NO_ERROR with no way to tell the two apart. This is
+-    // where they say what went wrong instead.
+-    //
+-    // One slot per thread and the first error wins, which is what GL 4.6 sec 2.3.1
+-    // asks for. Per thread rather than per context because several of these paths
+-    // run with no context current at all.
++    // Context-local error flags; TLS fallback when no context is current.
+     void mg_set_gl_error(GLenum error);
++    // Opt-in diagnostics expose raw backend errors, including internal fallback attempts.
++    bool mg_strict_errors_enabled();
++    GLenum mg_read_backend_error();
++    bool mg_query_texture_unit_limit(GLenum pname, GLint* value);
+ 
+     GLenum pname_convert(GLenum pname);
+     GLenum map_tex_target(GLenum target);
+--- a/MobileGlues-cpp/gl/multidraw.cpp
++++ b/MobileGlues-cpp/gl/multidraw.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: preserve backend errors in opt-in diagnostics.
+ // MobileGlues - gl/multidraw.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -51,15 +52,12 @@
+ // otherwise an error left pending by the application would be misread as our own
+ // failure and push every later draw onto a slower path.
+ static GLenum mg_md_check() {
+-    return GLES.glGetError();
+-}
+-
+-// Empty the error queue so a following mg_md_check() reports only what the
+-// bracketed call produced. Nothing observable is lost: this layer already
+-// answers glGetError from elsewhere, so these entries could never reach the
+-// application anyway.
++    return mg_read_backend_error();
++}
++
++// Isolate the checked call; strict diagnostics retain errors consumed here.
+ static void mg_md_drain() {
+-    for (int i = 0; i < 16 && GLES.glGetError() != GL_NO_ERROR; ++i) {
++    for (int i = 0; i < 16 && mg_read_backend_error() != GL_NO_ERROR; ++i) {
+     }
+ }
+ 
 --- a/MobileGlues-cpp/gl/program.cpp
 +++ b/MobileGlues-cpp/gl/program.cpp
 @@ -1,3 +1,4 @@
@@ -1086,6 +2898,1085 @@
 +void mg_apply_program_defaults(GLuint program, const mg_program_defaults& defaults);
 +
 +#endif
+--- /dev/null
++++ b/MobileGlues-cpp/gl/srgb_mipmap.cpp
+@@ -0,0 +1,420 @@
++// Modified for FCL Quest VR on 2026-11-13: desktop sRGB mipmap generation on GLES.
++// Copyright (c) 2026 FCL Quest VR contributors
++// SPDX-License-Identifier: LGPL-2.1-only
++
++#include "srgb_mipmap.h"
++#include "mg.h"
++#include <algorithm>
++#include <array>
++#include <cstring>
++#include <new>
++#include <string>
++#include <vector>
++
++#define DEBUG 0
++
++namespace {
++bool drain_errors() {
++    bool clean = true;
++    for (unsigned i = 0; i < 8; ++i) {
++        if (mg_read_backend_error() == GL_NO_ERROR) break;
++        clean = false;
++    }
++    return clean;
++}
++
++bool extension(const char* name) {
++    GLint count = 0;
++    GLES.glGetIntegerv(GL_NUM_EXTENSIONS, &count);
++    for (GLint i = 0; i < count; ++i) {
++        const auto* value = GLES.glGetStringi(GL_EXTENSIONS, i);
++        if (value && std::strcmp(reinterpret_cast<const char*>(value), name) == 0) return true;
++    }
++    return false;
++}
++
++GLenum binding_query(GLenum target) {
++    switch (target) {
++    case GL_TEXTURE_2D: return GL_TEXTURE_BINDING_2D;
++    case GL_TEXTURE_CUBE_MAP: return GL_TEXTURE_BINDING_CUBE_MAP;
++    case GL_TEXTURE_2D_ARRAY: return GL_TEXTURE_BINDING_2D_ARRAY;
++    case GL_TEXTURE_3D: return GL_TEXTURE_BINDING_3D;
++    default: return 0;
++    }
++}
++
++struct saved_state {
++    GLenum target;
++    GLint active = GL_TEXTURE0, texture = 0, sampler = 0, program = 0, vao = 0;
++    GLint read_fbo = 0, draw_fbo = 0, unpack_pbo = 0;
++    GLint polygon_mode[2] = {GL_FILL, GL_FILL};
++    using polygon_mode_fn = void (GLAPIENTRY *)(GLenum, GLenum);
++    polygon_mode_fn polygon = nullptr;
++    std::array<GLint, 4> viewport{}, swizzle{};
++    std::array<GLboolean, 4> color_mask{};
++    std::vector<std::pair<GLenum, GLboolean>> enables;
++    GLboolean blend = GL_FALSE;
++    GLboolean scissor = GL_FALSE;
++    bool indexed_scissor = false;
++    bool indexed = false, tf_paused_by_us = false, changed = false;
++    decltype(GLES.glDisablei) disable_index = nullptr;
++    decltype(GLES.glEnablei) enable_index = nullptr;
++    decltype(GLES.glIsEnabledi) enabled_index = nullptr;
++    decltype(GLES.glColorMaski) mask_index = nullptr;
++
++    explicit saved_state(GLenum target_) : target(target_) {}
++
++    bool capture() {
++        GLES.glGetIntegerv(GL_CURRENT_PROGRAM, &program);
++        if (program != 0) {
++            GLint deleting = GL_FALSE;
++            GLES.glGetProgramiv(program, GL_DELETE_STATUS, &deleting);
++            if (deleting) return false;
++        }
++        for (GLenum query : {GL_ANY_SAMPLES_PASSED, GL_ANY_SAMPLES_PASSED_CONSERVATIVE}) {
++            GLint current = 0;
++            GLES.glGetQueryiv(query, GL_CURRENT_QUERY, &current);
++            if (current != 0) return false;
++        }
++        GLES.glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
++        GLES.glGetIntegerv(binding_query(target), &texture);
++        if (texture == 0 || !GLES.glIsTexture(texture)) return false;
++        GLES.glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
++        if (sampler != 0 && !GLES.glIsSampler(sampler)) return false;
++        GLES.glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
++        GLES.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
++        GLES.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
++        GLES.glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_pbo);
++        if (unpack_pbo != 0 && !GLES.glIsBuffer(unpack_pbo)) return false;
++        GLES.glGetIntegerv(GL_VIEWPORT, viewport.data());
++        if (g_gles_caps.GL_NV_polygon_mode) {
++            GLES.glGetIntegerv(GL_POLYGON_MODE, polygon_mode);
++            polygon = reinterpret_cast<polygon_mode_fn>(proc_address(gles, "glPolygonModeNV"));
++            if (!polygon && polygon_mode[0] != GL_FILL) return false;
++        }
++        for (unsigned i = 0; i < 4; ++i)
++            GLES.glGetTexParameteriv(target, GL_TEXTURE_SWIZZLE_R + i, &swizzle[i]);
++        const bool core_indexed = g_gles_caps.major > 3 || (g_gles_caps.major == 3 && g_gles_caps.minor >= 2);
++        const char* suffix = extension("GL_EXT_draw_buffers_indexed") ? "EXT"
++                             : extension("GL_OES_draw_buffers_indexed") ? "OES" : nullptr;
++        indexed = core_indexed || suffix;
++        if (indexed) {
++            if (core_indexed) {
++                disable_index = GLES.glDisablei;
++                enable_index = GLES.glEnablei;
++                enabled_index = GLES.glIsEnabledi;
++                mask_index = GLES.glColorMaski;
++            } else {
++                disable_index = reinterpret_cast<decltype(disable_index)>(proc_address(gles, (std::string("glDisablei") + suffix).c_str()));
++                enable_index = reinterpret_cast<decltype(enable_index)>(proc_address(gles, (std::string("glEnablei") + suffix).c_str()));
++                enabled_index = reinterpret_cast<decltype(enabled_index)>(proc_address(gles, (std::string("glIsEnabledi") + suffix).c_str()));
++                mask_index = reinterpret_cast<decltype(mask_index)>(proc_address(gles, (std::string("glColorMaski") + suffix).c_str()));
++            }
++            if (!disable_index || !enable_index || !enabled_index || !mask_index || !GLES.glGetBooleani_v) return false;
++            blend = enabled_index(GL_BLEND, 0);
++            GLES.glGetBooleani_v(GL_COLOR_WRITEMASK, 0, color_mask.data());
++        } else {
++            blend = GLES.glIsEnabled(GL_BLEND);
++            GLES.glGetBooleanv(GL_COLOR_WRITEMASK, color_mask.data());
++        }
++        indexed_scissor = extension("GL_OES_viewport_array") || extension("GL_NV_viewport_array");
++        if (indexed_scissor) {
++            if (!indexed) return false;
++            scissor = enabled_index(GL_SCISSOR_TEST, 0);
++        } else {
++            enables.emplace_back(GL_SCISSOR_TEST, GLES.glIsEnabled(GL_SCISSOR_TEST));
++        }
++        for (GLenum cap : {GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE,
++                           GL_RASTERIZER_DISCARD, GL_DITHER, GL_SAMPLE_COVERAGE, GL_SAMPLE_ALPHA_TO_COVERAGE})
++            enables.emplace_back(cap, GLES.glIsEnabled(cap));
++        if (g_gles_caps.major > 3 || (g_gles_caps.major == 3 && g_gles_caps.minor >= 1))
++            enables.emplace_back(GL_SAMPLE_MASK, GLES.glIsEnabled(GL_SAMPLE_MASK));
++        if (g_gles_caps.GL_EXT_sRGB_write_control)
++            enables.emplace_back(GL_FRAMEBUFFER_SRGB, GLES.glIsEnabled(GL_FRAMEBUFFER_SRGB));
++        if (g_gles_caps.GL_EXT_clip_cull_distance || core_indexed) {
++            GLint count = 0;
++            GLES.glGetIntegerv(GL_MAX_CLIP_DISTANCES, &count);
++            for (GLint i = 0; i < std::min(count, 8); ++i)
++                enables.emplace_back(GL_CLIP_DISTANCE0 + i, GLES.glIsEnabled(GL_CLIP_DISTANCE0 + i));
++        }
++        return drain_errors();
++    }
++
++    void prepare() {
++        changed = true;
++        GLboolean tf_active = GL_FALSE, tf_paused = GL_FALSE;
++        GLES.glGetBooleanv(GL_TRANSFORM_FEEDBACK_ACTIVE, &tf_active);
++        GLES.glGetBooleanv(GL_TRANSFORM_FEEDBACK_PAUSED, &tf_paused);
++        if (tf_active && !tf_paused) {
++            GLES.glPauseTransformFeedback();
++            tf_paused_by_us = true;
++        }
++        for (const auto& [cap, enabled] : enables) {
++            if (cap == GL_FRAMEBUFFER_SRGB) GLES.glEnable(cap);
++            else GLES.glDisable(cap);
++        }
++        if (indexed) {
++            disable_index(GL_BLEND, 0);
++            mask_index(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++        } else {
++            GLES.glDisable(GL_BLEND);
++            GLES.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++        }
++        if (indexed_scissor) disable_index(GL_SCISSOR_TEST, 0);
++        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++        if (polygon) polygon(GL_FRONT_AND_BACK, GL_FILL);
++        const GLenum defaults[] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
++        for (unsigned i = 0; i < 4; ++i) GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + i, defaults[i]);
++    }
++
++    ~saved_state() {
++        if (!changed) return;
++        GLES.glActiveTexture(active);
++        GLES.glBindTexture(target, texture);
++        for (unsigned i = 0; i < 4; ++i) GLES.glTexParameteri(target, GL_TEXTURE_SWIZZLE_R + i, swizzle[i]);
++        GLES.glBindSampler(active - GL_TEXTURE0, sampler);
++        GLES.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_pbo);
++        GLES.glUseProgram(program);
++        GLES.glBindVertexArray(vao);
++        GLES.glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
++        GLES.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
++        GLES.glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
++        if (polygon) polygon(GL_FRONT_AND_BACK, polygon_mode[0]);
++        for (const auto& [cap, enabled] : enables) {
++            if (enabled) GLES.glEnable(cap);
++            else GLES.glDisable(cap);
++        }
++        if (indexed) {
++            if (blend) enable_index(GL_BLEND, 0);
++            else disable_index(GL_BLEND, 0);
++            mask_index(0, color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
++        } else {
++            if (blend) GLES.glEnable(GL_BLEND);
++            else GLES.glDisable(GL_BLEND);
++            GLES.glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
++        }
++        if (indexed_scissor) {
++            if (scissor) enable_index(GL_SCISSOR_TEST, 0);
++            else disable_index(GL_SCISSOR_TEST, 0);
++        }
++        if (tf_paused_by_us) GLES.glResumeTransformFeedback();
++    }
++};
++
++struct resources {
++    GLuint texture = 0, fbo = 0, vao = 0, sampler = 0, program = 0, vertex = 0, fragment = 0;
++    ~resources() {
++        if (texture) GLES.glDeleteTextures(1, &texture);
++        if (fbo) GLES.glDeleteFramebuffers(1, &fbo);
++        if (vao) GLES.glDeleteVertexArrays(1, &vao);
++        if (sampler) GLES.glDeleteSamplers(1, &sampler);
++        if (program) GLES.glDeleteProgram(program);
++        if (vertex) GLES.glDeleteShader(vertex);
++        if (fragment) GLES.glDeleteShader(fragment);
++    }
++};
++
++bool compile(GLuint shader, const char* source) {
++    GLES.glShaderSource(shader, 1, &source, nullptr);
++    GLES.glCompileShader(shader);
++    GLint ready = GL_FALSE;
++    GLES.glGetShaderiv(shader, GL_COMPILE_STATUS, &ready);
++    return ready == GL_TRUE;
++}
++
++bool make_program(resources& r, GLenum target) {
++    const char* vertex = R"(#version 300 es
++precision highp float;
++out vec2 uv;
++void main() {
++    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
++    uv = p;
++    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
++})";
++    const char* type = target == GL_TEXTURE_2D ? "sampler2D" : target == GL_TEXTURE_CUBE_MAP ? "samplerCube"
++                       : target == GL_TEXTURE_2D_ARRAY ? "sampler2DArray" : "sampler3D";
++    std::string fragment = "#version 300 es\nprecision highp float;\nprecision highp " + std::string(type) +
++        ";\nin vec2 uv;\nuniform " + type + " source;\nuniform float layer;\nlayout(location=0) out vec4 color;\n";
++    if (target == GL_TEXTURE_CUBE_MAP) {
++        fragment += R"(vec3 coord() {
++    vec2 p = uv * 2.0 - 1.0;
++    if (layer < 0.5) return vec3(1.0, -p.y, -p.x);
++    if (layer < 1.5) return vec3(-1.0, -p.y, p.x);
++    if (layer < 2.5) return vec3(p.x, 1.0, p.y);
++    if (layer < 3.5) return vec3(p.x, -1.0, -p.y);
++    if (layer < 4.5) return vec3(p.x, -p.y, 1.0);
++    return vec3(-p.x, -p.y, -1.0);
++}
++)";
++    }
++    const char* coord = target == GL_TEXTURE_2D ? "uv" : target == GL_TEXTURE_CUBE_MAP ? "coord()" : "vec3(uv, layer)";
++    fragment += "void main() { color = vec4(textureLod(source, " + std::string(coord) + ", 0.0).rgb, 1.0); }\n";
++    r.vertex = GLES.glCreateShader(GL_VERTEX_SHADER);
++    r.fragment = GLES.glCreateShader(GL_FRAGMENT_SHADER);
++    if (!r.vertex || !r.fragment || !compile(r.vertex, vertex) || !compile(r.fragment, fragment.c_str())) return false;
++    r.program = GLES.glCreateProgram();
++    GLES.glAttachShader(r.program, r.vertex);
++    GLES.glAttachShader(r.program, r.fragment);
++    GLES.glLinkProgram(r.program);
++    GLint ready = GL_FALSE;
++    GLES.glGetProgramiv(r.program, GL_LINK_STATUS, &ready);
++    return ready == GL_TRUE && drain_errors();
++}
++
++void attach_slice(GLenum target, GLuint texture, GLint level, GLint slice) {
++    if (target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP) {
++        const GLenum face = target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + slice : target;
++        GLES.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face, texture, level);
++    } else {
++        GLES.glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, level, slice);
++    }
++}
++
++void allocate_level(GLenum target, GLint level, GLenum format, GLsizei width, GLsizei height, GLsizei depth) {
++    if (target == GL_TEXTURE_CUBE_MAP) {
++        for (unsigned i = 0; i < 6; ++i)
++            GLES.glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, level, format, width, height, 0,
++                              format == GL_SRGB8 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++    } else if (target == GL_TEXTURE_2D) {
++        GLES.glTexImage2D(target, level, format, width, height, 0,
++                          format == GL_SRGB8 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++    } else {
++        GLES.glTexImage3D(target, level, format, width, height, depth, 0,
++                          format == GL_SRGB8 ? GL_RGB : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++    }
++}
++
++bool generate(GLenum target, GLint base, GLint last, GLint width, GLint height, GLint depth, bool immutable) {
++    GLint viewport_limit[2] = {};
++    GLES.glGetIntegerv(GL_MAX_VIEWPORT_DIMS, viewport_limit);
++    if (width > viewport_limit[0] || height > viewport_limit[1]) return false;
++    resources r;
++    saved_state state(target);
++    if (!state.capture()) return false;
++    if (!make_program(r, target)) return false;
++    state.prepare();
++    GLES.glGenTextures(1, &r.texture);
++    GLES.glGenFramebuffers(1, &r.fbo);
++    GLES.glGenVertexArrays(1, &r.vao);
++    GLES.glGenSamplers(1, &r.sampler);
++    if (!r.texture || !r.fbo || !r.vao || !r.sampler) return false;
++    GLES.glSamplerParameteri(r.sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++    GLES.glSamplerParameteri(r.sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++    GLES.glSamplerParameteri(r.sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    GLES.glSamplerParameteri(r.sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    GLES.glSamplerParameteri(r.sampler, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
++    GLES.glBindSampler(state.active - GL_TEXTURE0, r.sampler);
++    GLES.glBindTexture(target, r.texture);
++    allocate_level(target, 0, GL_SRGB8_ALPHA8, width, height, depth);
++    GLES.glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, last - base);
++    GLES.glBindFramebuffer(GL_FRAMEBUFFER, r.fbo);
++    const GLenum attachment = GL_COLOR_ATTACHMENT0;
++    GLES.glDrawBuffers(1, &attachment);
++    GLES.glReadBuffer(GL_COLOR_ATTACHMENT0);
++    GLES.glBindVertexArray(r.vao);
++    GLES.glUseProgram(r.program);
++    GLES.glUniform1i(GLES.glGetUniformLocation(r.program, "source"), state.active - GL_TEXTURE0);
++    const GLint layer_location = GLES.glGetUniformLocation(r.program, "layer");
++    GLES.glBindTexture(target, state.texture);
++    GLES.glViewport(0, 0, width, height);
++    if (!drain_errors()) return false;
++    const GLint slices = target == GL_TEXTURE_CUBE_MAP ? 6 : depth;
++    for (GLint slice = 0; slice < slices; ++slice) {
++        attach_slice(target, r.texture, 0, slice);
++        if (GLES.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
++        GLES.glUniform1f(layer_location, target == GL_TEXTURE_3D ? (slice + 0.5f) / depth : static_cast<float>(slice));
++        GLES.glDrawArrays(GL_TRIANGLES, 0, 3);
++        if (!drain_errors()) return false;
++    }
++    GLES.glBindTexture(target, r.texture);
++    GLES.glGenerateMipmap(target);
++    if (!drain_errors()) return false;
++    GLES.glBindTexture(target, state.texture);
++    for (GLint level = base + 1; level <= last; ++level) {
++        width = std::max(1, width / 2);
++        height = std::max(1, height / 2);
++        if (target == GL_TEXTURE_3D) depth = std::max(1, depth / 2);
++        if (!immutable) allocate_level(target, level, GL_SRGB8, width, height, depth);
++        if (!drain_errors()) return false;
++        const GLint count = target == GL_TEXTURE_CUBE_MAP ? 6 : depth;
++        for (GLint slice = 0; slice < count; ++slice) {
++            attach_slice(target, r.texture, level - base, slice);
++            if (GLES.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
++            if (target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP) {
++                const GLenum face = target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + slice : target;
++                GLES.glCopyTexSubImage2D(face, level, 0, 0, 0, 0, width, height);
++            } else {
++                GLES.glCopyTexSubImage3D(target, level, 0, 0, slice, 0, 0, width, height);
++            }
++            if (!drain_errors()) return false;
++        }
++    }
++    return true;
++}
++} // namespace
++
++bool generate_srgb_mipmap(GLenum target) {
++    if (g_gles_caps.major < 3 || (g_gles_caps.major == 3 && g_gles_caps.minor < 1)) return false;
++    if (!binding_query(target) || !GLES.glGetTexLevelParameteriv) return false;
++    GLint base = 0, maximum = 0, immutable = GL_FALSE, levels = 0;
++    GLES.glGetTexParameteriv(target, GL_TEXTURE_BASE_LEVEL, &base);
++    GLES.glGetTexParameteriv(target, GL_TEXTURE_MAX_LEVEL, &maximum);
++    GLES.glGetTexParameteriv(target, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
++    if (immutable) {
++        GLES.glGetTexParameteriv(target, GL_TEXTURE_IMMUTABLE_LEVELS, &levels);
++        base = std::min(base, std::max(0, levels - 1));
++        maximum = std::min(maximum, levels - 1);
++    }
++    GLint texture_limit = 0, max_base = 0;
++    GLES.glGetIntegerv(target == GL_TEXTURE_CUBE_MAP ? GL_MAX_CUBE_MAP_TEXTURE_SIZE
++                       : target == GL_TEXTURE_3D ? GL_MAX_3D_TEXTURE_SIZE : GL_MAX_TEXTURE_SIZE, &texture_limit);
++    while (texture_limit > 1) { texture_limit /= 2; ++max_base; }
++    if (base < 0 || base > max_base) return false;
++    const GLenum image_target = target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X : target;
++    GLint format = 0, width = 0, height = 0, depth = 1;
++    GLES.glGetTexLevelParameteriv(image_target, base, GL_TEXTURE_INTERNAL_FORMAT, &format);
++    if (format != GL_SRGB8) return false;
++    drain_errors();
++    GLES.glGetTexLevelParameteriv(image_target, base, GL_TEXTURE_WIDTH, &width);
++    GLES.glGetTexLevelParameteriv(image_target, base, GL_TEXTURE_HEIGHT, &height);
++    if (target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY)
++        GLES.glGetTexLevelParameteriv(image_target, base, GL_TEXTURE_DEPTH, &depth);
++    if (!drain_errors()) return true;
++    if (target == GL_TEXTURE_CUBE_MAP) {
++        for (unsigned i = 0; i < 6; ++i) {
++            GLint w = 0, h = 0, f = 0;
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, base, GL_TEXTURE_WIDTH, &w);
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, base, GL_TEXTURE_HEIGHT, &h);
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, base, GL_TEXTURE_INTERNAL_FORMAT, &f);
++            if (width <= 0 || w != width || h != width || f != GL_SRGB8) {
++                mg_set_gl_error(GL_INVALID_OPERATION);
++                return true;
++            }
++        }
++    }
++    if (width == 0 || height == 0 || depth == 0) return true;
++    GLint last = base;
++    GLint dimension = std::max(width, height);
++    if (target == GL_TEXTURE_3D) dimension = std::max(dimension, depth);
++    while (dimension > 1 && last < maximum) {
++        dimension /= 2;
++        ++last;
++    }
++    if (last <= base) return true;
++    if (!generate(target, base, last, width, height, depth, immutable != GL_FALSE)) {
++        mg_set_gl_error(GL_INVALID_OPERATION);
++        LOG_W_FORCE("SRGB8 mipmap fallback failed: target=0x%x base=%d last=%d size=%dx%dx%d", target, base, last, width, height, depth)
++    }
++    return true;
++}
++
++bool mg_generate_srgb_mipmap(GLenum target) {
++    try {
++        return generate_srgb_mipmap(target);
++    } catch (const std::bad_alloc&) {
++        mg_set_gl_error(GL_OUT_OF_MEMORY);
++    } catch (...) {
++        mg_set_gl_error(GL_INVALID_OPERATION);
++    }
++    return true;
++}
+--- /dev/null
++++ b/MobileGlues-cpp/gl/srgb_mipmap.h
+@@ -0,0 +1,10 @@
++// Modified for FCL Quest VR on 2026-11-13: desktop sRGB mipmap generation on GLES.
++// SPDX-License-Identifier: LGPL-2.1-only
++#ifndef MOBILEGLUES_SRGB_MIPMAP_H
++#define MOBILEGLUES_SRGB_MIPMAP_H
++
++#include <GL/gl.h>
++
++bool mg_generate_srgb_mipmap(GLenum target);
++
++#endif
+--- a/MobileGlues-cpp/gl/texture.cpp
++++ b/MobileGlues-cpp/gl/texture.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: preserve backend errors in opt-in diagnostics.
+ // MobileGlues - gl/texture.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -30,6 +31,7 @@
+ #include "framebuffer.h"
+ #include "log.h"
+ #include "transfer.h"
++#include "depth_upload.h"
+ #include "pixel.h"
+ #include "mg.h"
+ #include <GL/gl.h>
+@@ -524,52 +526,14 @@
+         LOG_D("Find GL_DEPTH_COMPONENT: internalFormat: %s, format: %s, type: %s", glEnumToString(*internal_format),
+               format ? glEnumToString(*format) : "(none)", type ? glEnumToString(*type) : "(none)");
+         if (type && has_data) {
+-            // A glTexImage* that carries bytes. Deliberately left unsized:
+-            // deriving a sized format from format/type here is what used to make
+-            // drivers reject otherwise valid uploads, and ES2 compatibility --
+-            // which every ES3 driver carries -- accepts the unsized form with
+-            // data.
+-            //
+-            // GL_FLOAT is the one type that compatibility does not reach. ES2
+-            // depth textures predate float depth entirely, so the unsized form
+-            // with GL_FLOAT is rejected outright, and a rejected glTexImage2D
+-            // leaves the level at its defaults -- the application is then holding
+-            // a GL_RGBA texture with no depth bits, and nothing says so.
+-            // Measured on Mali-G77: GL_TEXTURE_INTERNAL_FORMAT came back 0x1908
+-            // with GL_TEXTURE_DEPTH_SIZE 0, and sampling it returned 0.
+-            // GL_DEPTH_COMPONENT32F is the only destination ES 3.0 offers for
+-            // float depth, and here the type is evidence: there really are float
+-            // bits, and GL 4.6 sec. 8.5 lets the effective internal format of a
+-            // base internal format depend on format and type.
+-            if (*type == GL_FLOAT) {
+-                *internal_format = GL_DEPTH_COMPONENT32F;
+-            } else {
+-                *internal_format = GL_DEPTH_COMPONENT;
+-                *type = GL_UNSIGNED_INT;
+-            }
+-        } else if (type) {
+-            // An allocation-only glTexImage*. The type describes no bytes, so it
+-            // must not choose the storage class: the ordinary shadow-map
+-            // allocation is glTexImage2D(GL_DEPTH_COMPONENT, ..., GL_FLOAT, NULL)
+-            // with GL_FLOAT written out of habit, and honouring it there silently
+-            // makes the whole texture floating-point. That matters because
+-            // glTexSubImage2D never revisits this function and never inspects the
+-            // level, so every later fixed-point upload into a level turned 32F is
+-            // rejected by ES -- which binds GL_DEPTH_COMPONENT32F to GL_FLOAT
+-            // alone, where GL 4.6 converts -- and the rejection is invisible.
+-            // Measured on Mali-G77: the allocation and a following
+-            // glTexSubImage2D(GL_UNSIGNED_INT) both succeed as written here, and
+-            // resolving to 32F turned that second call into GL_INVALID_OPERATION
+-            // with the texture left holding its old contents.
+-            *internal_format = GL_DEPTH_COMPONENT;
+-            *type = GL_UNSIGNED_INT;
++            if (*type == GL_FLOAT) *internal_format = GL_DEPTH_COMPONENT32F;
++            else if (*type == GL_UNSIGNED_SHORT) *internal_format = GL_DEPTH_COMPONENT16;
++            else if (*type == GL_UNSIGNED_INT) *internal_format = GL_DEPTH_COMPONENT24;
+         } else {
+-            // glTexStorage*. There is no data and no type to be wrong about, and
+-            // the unsized form is rejected outright by both vendors -- it is not
+-            // in the sized-internalformat table that glTexStorage* requires.
+-            // Leaving it alone allocated no storage at all while the layer went
+-            // on recording the texture as complete.
++            // No pixels means FLOAT is not evidence of floating-point storage.
++            // Explicit D24 also matches depth renderbuffers during a blit.
+             *internal_format = GL_DEPTH_COMPONENT24;
++            if (type) *type = GL_UNSIGNED_INT;
+         }
+         break;
+     case GL_DEPTH_STENCIL:
+@@ -931,6 +895,10 @@
+         return;
+     }
+ 
++    mg_depth_upload_t depth_fix(target, level, width, height, 1, format, type, fix.pixels,
++                               static_cast<GLenum>(internalFormat), false, false, 0, 0, 0, border);
++    if (depth_fix.dropped()) return;
++
+     GET_TEXTURE_OBJECT(target);
+     tex->target = ConvertGLEnumToTextureTarget(target);
+     tex->internal_format = internalFormat;
+@@ -941,10 +909,9 @@
+     tex->swizzle_param[1] = GL_GREEN;
+     tex->swizzle_param[2] = GL_BLUE;
+     tex->swizzle_param[3] = GL_ALPHA;
+-
+     tex->format = format;
+ 
+-    GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, type, fix.pixels);
++    GLES.glTexImage2D(target, level, internalFormat, width, height, border, format, depth_fix.type, depth_fix.pixels);
+ 
+     CHECK_GL_ERROR
+ }
+@@ -989,7 +956,10 @@
+         return;
+     }
+ 
+-    GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, fix.pixels);
++    mg_depth_upload_t depth_fix(target, level, width, height, depth, format, type, fix.pixels,
++                               static_cast<GLenum>(internalFormat), true, false, 0, 0, 0, border);
++    if (depth_fix.dropped()) return;
++    GLES.glTexImage3D(target, level, internalFormat, width, height, depth, border, format, depth_fix.type, depth_fix.pixels);
+ 
+     GET_TEXTURE_OBJECT(target);
+     tex->target = ConvertGLEnumToTextureTarget(target);
+@@ -1052,7 +1022,7 @@
+     tex->swizzle_param[2] = GL_BLUE;
+     tex->swizzle_param[3] = GL_ALPHA;
+ 
+-    GLenum ERR = GLES.glGetError();
++    GLenum ERR = mg_read_backend_error();
+     if (ERR != GL_NO_ERROR) LOG_E("glTexStorage2D ERROR: %d", ERR)
+ }
+ 
+@@ -1312,7 +1282,7 @@
+         // failure is invisible from here -- this layer's glGetError never
+         // reports. Say so once rather than copying nothing in silence.
+         if (GLES.glGetError != nullptr) {
+-            while (GLES.glGetError() != GL_NO_ERROR) {
++            while (mg_read_backend_error() != GL_NO_ERROR) {
+             }
+         }
+         // The flush is load-bearing. Adreno keeps the source's pending depth
+@@ -1328,7 +1298,7 @@
+         if (GLES.glFlush != nullptr) GLES.glFlush();
+         GLES.glBlitFramebuffer(x, y, x + width, y + height, xoffset, yoffset, xoffset + width, yoffset + height, mask,
+                                GL_NEAREST);
+-        if (GLES.glGetError != nullptr && GLES.glGetError() != GL_NO_ERROR) {
++        if (GLES.glGetError != nullptr && mg_read_backend_error() != GL_NO_ERROR) {
+             TX_WARN_ONCE("glCopyTexSubImage2D: the driver refused a depth blit into internalformat 0x%04X -- GLES "
+                          "requires the source framebuffer to have exactly the same depth/stencil format, so nothing "
+                          "was copied",
+@@ -1478,7 +1448,10 @@
+         return;
+     }
+ 
+-    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, fix.format, fix.type, fix.pixels);
++    mg_depth_upload_t depth_fix(target, level, width, height, 1, fix.format, fix.type, fix.pixels,
++                               mg_depth_level_format(target, level, fix.format), false, true, xoffset, yoffset);
++    if (depth_fix.dropped()) return;
++    GLES.glTexSubImage2D(target, level, xoffset, yoffset, width, height, fix.format, depth_fix.type, depth_fix.pixels);
+ 
+     CHECK_GL_ERROR
+ }
+@@ -1731,8 +1704,11 @@
+         CHECK_GL_ERROR
+         return;
+     }
+-    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, fix.format, fix.type,
+-                         fix.pixels);
++    mg_depth_upload_t depth_fix(target, level, width, height, depth, fix.format, fix.type, fix.pixels,
++                               mg_depth_level_format(target, level, fix.format), true, true, xoffset, yoffset, zoffset);
++    if (depth_fix.dropped()) return;
++    GLES.glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, fix.format, depth_fix.type,
++                       depth_fix.pixels);
+     CHECK_GL_ERROR
+ }
+ 
+--- a/MobileGlues-cpp/gl/transfer.cpp
++++ b/MobileGlues-cpp/gl/transfer.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: preserve backend errors in opt-in diagnostics.
+ // MobileGlues - gl/transfer.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -358,7 +359,7 @@
+             // serve is a copy into a buffer asked for with _READ, which is a buffer
+             // we can make ourselves. Dropping the upload here instead is what left
+             // Xaero's map tiles, which arrive exactly this way, as black texture.
+-            while (GLES.glGetError() != GL_NO_ERROR) {
++            while (mg_read_backend_error() != GL_NO_ERROR) {
+             } // the failed map left an error behind
+             if (GLES.glCopyBufferSubData != nullptr && GLES.glGenBuffers != nullptr &&
+                 GLES.glDeleteBuffers != nullptr && GLES.glBufferData != nullptr) {
+@@ -589,18 +590,14 @@
+     int dst_size;
+ };
+ 
+-// Whether the driver took a call, asked of the driver directly: this layer's own
+-// glGetError always answers GL_NO_ERROR, so it cannot report anything. gl/multidraw.cpp
+-// probes the same way for the same reason.
++// Probe the backend without consuming the application error channels.
+ GLenum mg_tr_check() {
+-    return GLES.glGetError();
+-}
+-
+-// Empty the queue first, or an error the application left pending would be read as
+-// our own failure. Nothing observable is lost -- those entries could never reach the
+-// application anyway.
++    return mg_read_backend_error();
++}
++
++// Strict diagnostics retain errors consumed by the internal probe.
+ void mg_tr_drain() {
+-    for (int i = 0; i < 16 && GLES.glGetError() != GL_NO_ERROR; ++i) {
++    for (int i = 0; i < 16 && mg_read_backend_error() != GL_NO_ERROR; ++i) {
+     }
+ }
+ 
+--- /dev/null
++++ b/MobileGlues-cpp/gl/vrm_diagnostics.cpp
+@@ -0,0 +1,363 @@
++// Modified for FCL Quest VR on 2026-11-13: bounded per-model VRM and mip diagnostics.
++// Copyright (c) 2026 FCL Quest contributors
++// SPDX-License-Identifier: LGPL-2.1-only
++#include "vrm_diagnostics.h"
++#include "framebuffer.h"
++#include "log.h"
++#include "../gles/loader.h"
++#include "../egl/context.h"
++#include <atomic>
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdarg>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <tuple>
++#include <vector>
++
++#define DEBUG 0
++
++namespace {
++std::atomic<unsigned> samples{0};
++std::atomic<bool> stopped{false};
++constexpr unsigned limit = 512, model_limit = 24;
++constexpr size_t byte_limit = 4 * 1024 * 1024;
++constexpr uint64_t idle_ms = 30000;
++std::mutex output_mutex;
++size_t output_bytes = 0;
++
++void budget_notice(const char* reason) noexcept {
++    std::lock_guard<std::mutex> lock(output_mutex);
++    if (stopped.exchange(true, std::memory_order_relaxed)) return;
++    LOG_V("[MG-VRM] budget=%s capture-stopped samples=%u", reason, samples.load(std::memory_order_relaxed));
++}
++
++void record(const char* format, ...) noexcept {
++    char line[2048];
++    va_list args;
++    va_start(args, format);
++    const int length = std::vsnprintf(line, sizeof(line), format, args);
++    va_end(args);
++    if (length < 0) return;
++    const size_t bytes = std::min(static_cast<size_t>(length), sizeof(line) - 1) + 1;
++    bool full = false;
++    {
++        std::lock_guard<std::mutex> lock(output_mutex);
++        if (stopped.load(std::memory_order_relaxed)) return;
++        full = output_bytes + bytes > byte_limit - 128;
++        if (!full) {
++            output_bytes += bytes;
++            LOG_V("%s", line);
++        }
++    }
++    if (full) budget_notice("4MiB");
++}
++
++struct draw_signature {
++    GLuint program = 0, vao = 0;
++    std::array<GLint, 8> modes{};
++    std::array<uint32_t, 7> colors{};
++    std::array<GLint, 11> units{}, textures{}, samplers{};
++    bool operator==(const draw_signature&) const = default;
++};
++
++struct model_samples {
++    uint64_t last_seen = 0;
++    std::array<unsigned, 2> counts{};
++    std::array<bool, 2> notified{};
++    std::vector<draw_signature> signatures;
++};
++
++struct sampling_gate {
++    std::map<std::tuple<uint64_t, GLuint, GLuint>, model_samples> models;
++    unsigned total = 0;
++
++    unsigned claim(uint64_t context, const draw_signature& key, uint64_t now, bool& capped) {
++        capped = false;
++        if (total >= limit) return 0;
++        auto& model = models[{context, key.program, key.vao}];
++        // Without deletion hooks, a quiet interval is only a name-reuse heuristic.
++        if (now - model.last_seen >= idle_ms) model = {};
++        model.last_seen = now;
++        const unsigned state = key.modes[0] != 0;
++        if (std::find(model.signatures.begin(), model.signatures.end(), key) != model.signatures.end()) return 0;
++        if (model.counts[state] >= model_limit) {
++            capped = !model.notified[state];
++            model.notified[state] = true;
++            return 0;
++        }
++        model.signatures.push_back(key);
++        ++model.counts[state];
++        return ++total;
++    }
++};
++
++sampling_gate gate;
++std::mutex gate_mutex;
++
++bool enabled() noexcept {
++    static const bool value = [] {
++        const char* setting = std::getenv("MG_VRM_DIAGNOSTICS");
++        return setting && std::strcmp(setting, "1") == 0;
++    }();
++    return value;
++}
++
++GLint integer(GLenum name) noexcept {
++    GLint value = 0;
++    GLES.glGetIntegerv(name, &value);
++    return value;
++}
++
++struct active_texture_scope {
++    GLint saved = integer(GL_ACTIVE_TEXTURE);
++    ~active_texture_scope() { GLES.glActiveTexture(saved); }
++};
++
++struct copy_read_scope {
++    GLint saved = integer(GL_COPY_READ_BUFFER_BINDING);
++    ~copy_read_scope() { GLES.glBindBuffer(GL_COPY_READ_BUFFER, saved); }
++};
++
++GLint uniform_int(GLuint program, const char* name, GLint missing = 0) noexcept {
++    const GLint location = GLES.glGetUniformLocation(program, name);
++    if (location < 0) return missing;
++    GLint values[16] = {};
++    GLES.glGetUniformiv(program, location, values);
++    return values[0];
++}
++
++void float_uniform(GLuint program, const char* name, unsigned sample) noexcept {
++    const GLint location = GLES.glGetUniformLocation(program, name);
++    if (location < 0) return;
++    GLfloat value[16] = {};
++    GLES.glGetUniformfv(program, location, value);
++    record("[MG-VRM] sample=%u uniform=%s f=%g,%g,%g,%g", sample, name,
++           value[0], value[1], value[2], value[3]);
++}
++
++void uniforms(GLuint program, unsigned sample) noexcept {
++    const char* ints[] = {"MaterialFeatures", "Kind", "TextureMask", "ColorTextureSrgbMask",
++                         "AlphaMode", "OutlinePass", "OutlineMode", "FramebufferSrgb"};
++    for (const char* name : ints) {
++        const GLint location = GLES.glGetUniformLocation(program, name);
++        if (location < 0) continue;
++        GLint value[16] = {};
++        GLES.glGetUniformiv(program, location, value);
++        record("[MG-VRM] sample=%u uniform=%s i=%d", sample, name, value[0]);
++    }
++    const char* floats[] = {"BaseColor", "LightIntensity", "Opacity", "AlphaCutoff",
++                           "OutlineWidth", "FogStart", "FogEnd", "LightDir", "FogColor", "ShadeColor",
++                           "UvScroll", "UvRotation", "TimeSeconds", "ShadingShift", "Toony", "GiEqualization"};
++    for (const char* name : floats) {
++        float_uniform(program, name, sample);
++    }
++}
++
++bool signature(draw_signature& key) noexcept {
++    const GLint program = integer(GL_CURRENT_PROGRAM);
++    if (program <= 0) return false;
++    GLint linked = GL_FALSE;
++    GLES.glGetProgramiv(program, GL_LINK_STATUS, &linked);
++    if (!linked || GLES.glGetUniformLocation(program, "MaterialFeatures") < 0 ||
++        GLES.glGetUniformLocation(program, "TextureMask") < 0 ||
++        GLES.glGetUniformLocation(program, "OutlinePass") < 0) return false;
++    key.program = program;
++    key.vao = integer(GL_VERTEX_ARRAY_BINDING);
++    const char* names[] = {"MaterialFeatures", "Kind", "TextureMask", "ColorTextureSrgbMask",
++                           "AlphaMode", "OutlinePass", "OutlineMode", "FramebufferSrgb"};
++    for (unsigned i = 0; i < key.modes.size(); ++i) key.modes[i] = uniform_int(program, names[i]);
++    unsigned color = 0;
++    for (const char* name : {"BaseColor", "ShadeColor"}) {
++        const GLint location = GLES.glGetUniformLocation(program, name);
++        GLfloat value[16] = {};
++        if (location >= 0) GLES.glGetUniformfv(program, location, value);
++        const unsigned n = color == 0 ? 4 : 3;
++        for (unsigned i = 0; i < n; ++i) std::memcpy(&key.colors[color++], &value[i], sizeof(uint32_t));
++    }
++    const GLint units = integer(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
++    active_texture_scope restore;
++    key.units.fill(-1);
++    for (unsigned i = 0; i < 11; ++i) {
++        if ((key.modes[2] & (1 << i)) == 0) continue;
++        char name[24];
++        std::snprintf(name, sizeof(name), "Texture%u", i);
++        const GLint unit = uniform_int(program, name, -1);
++        key.units[i] = unit;
++        if (unit < 0 || unit >= units) continue;
++        GLES.glActiveTexture(GL_TEXTURE0 + unit);
++        key.textures[i] = integer(GL_TEXTURE_BINDING_2D);
++        key.samplers[i] = integer(GL_SAMPLER_BINDING);
++    }
++    return true;
++}
++
++void textures(const draw_signature& key, unsigned sample, bool level_queries) noexcept {
++    active_texture_scope restore;
++    GLint max_level = 0;
++    for (GLint size = integer(GL_MAX_TEXTURE_SIZE); size > 1; size >>= 1) ++max_level;
++    const GLint units = integer(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
++    for (unsigned i = 0; i < 11; ++i) {
++        if ((key.modes[2] & (1 << i)) == 0) continue;
++        char name[32];
++        std::snprintf(name, sizeof(name), "UvTransform[%u]", i);
++        float_uniform(key.program, name, sample);
++        std::snprintf(name, sizeof(name), "UvAngle[%u]", i);
++        float_uniform(key.program, name, sample);
++        std::snprintf(name, sizeof(name), "UvSet[%u]", i);
++        record("[MG-VRM] sample=%u uniform=%s i=%d", sample, name, uniform_int(key.program, name, -1));
++        const GLint unit = key.units[i];
++        if (unit < 0 || unit >= units) {
++            record("[MG-VRM] sample=%u textureSlot=%u invalidUnit=%d", sample, i, unit);
++            continue;
++        }
++        GLES.glActiveTexture(GL_TEXTURE0 + unit);
++        const GLint texture = key.textures[i], sampler = key.samplers[i];
++        GLint base = -1, top = -1, filter = -1, sampler_filter = -1;
++        GLfloat min_lod = 0, max_lod = 0, sampler_min_lod = 0, sampler_max_lod = 0;
++        if (texture != 0) {
++            GLES.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &base);
++            GLES.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &top);
++            GLES.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &filter);
++            GLES.glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &min_lod);
++            GLES.glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, &max_lod);
++        }
++        if (sampler != 0) {
++            GLES.glGetSamplerParameteriv(sampler, GL_TEXTURE_MIN_FILTER, &sampler_filter);
++            GLES.glGetSamplerParameterfv(sampler, GL_TEXTURE_MIN_LOD, &sampler_min_lod);
++            GLES.glGetSamplerParameterfv(sampler, GL_TEXTURE_MAX_LOD, &sampler_max_lod);
++        }
++        record("[MG-VRM] sample=%u textureSlot=%u unit=%d texture=%d sampler=%d levels=%d..%d filter=0x%x samplerFilter=0x%x lod=%g..%g samplerLod=%g..%g",
++               sample, i, unit, texture, sampler, base, top, filter, sampler_filter,
++               min_lod, max_lod, sampler_min_lod, sampler_max_lod);
++        if (!texture || !level_queries || !GLES.glGetTexLevelParameteriv) continue;
++        std::array<bool, 32> visited{};
++        auto level = [&](GLint mip) {
++            if (mip < 0 || mip > max_level || mip >= static_cast<GLint>(visited.size()) || visited[mip]) return 0;
++            visited[mip] = true;
++            GLint width = 0, height = 0, format = 0;
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_2D, mip, GL_TEXTURE_WIDTH, &width);
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_2D, mip, GL_TEXTURE_HEIGHT, &height);
++            GLES.glGetTexLevelParameteriv(GL_TEXTURE_2D, mip, GL_TEXTURE_INTERNAL_FORMAT, &format);
++            record("[MG-VRM] sample=%u textureSlot=%u mip=%d size=%dx%d format=0x%x", sample, i, mip, width, height, format);
++            return std::max(width, height);
++        };
++        const GLint zero_size = level(0);
++        const GLint base_size = base == 0 ? zero_size : level(base);
++        GLint end = base;
++        for (GLint size = base_size; size > 1; size >>= 1) ++end;
++        end = std::min({end, top, max_level});
++        level(1);
++        for (GLint mip = std::max(base, 0); mip <= end && !stopped.load(std::memory_order_relaxed); ++mip) level(mip);
++    }
++}
++
++void attributes(unsigned sample) noexcept {
++    copy_read_scope restore;
++    const GLint max_attributes = integer(GL_MAX_VERTEX_ATTRIBS);
++    for (GLuint i = 0; i < 6 && static_cast<GLint>(i) < max_attributes; ++i) {
++        GLint active = 0, buffer = 0, stride = 0, size = 0, type = 0, normalized = 0, divisor = 0, integral = 0;
++        void* offset = nullptr;
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &active);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buffer);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &normalized);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_INTEGER, &integral);
++        GLES.glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_DIVISOR, &divisor);
++        GLES.glGetVertexAttribPointerv(i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &offset);
++        GLint64 bytes = -1;
++        if (buffer > 0 && GLES.glIsBuffer(buffer)) {
++            GLES.glBindBuffer(GL_COPY_READ_BUFFER, buffer);
++            GLES.glGetBufferParameteri64v(GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes);
++        }
++        record("[MG-VRM] sample=%u attribute=%u enabled=%d buffer=%d bytes=%lld offset=%llu stride=%d size=%d type=0x%x normalized=%d integer=%d divisor=%d",
++               sample, i, active, buffer, static_cast<long long>(bytes),
++               static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(offset)), stride, size, type, normalized, integral, divisor);
++    }
++}
++
++void capture(GLenum mode, GLsizei count, GLenum type, const draw_signature& key, unsigned sample) noexcept {
++    const GLuint program = key.program;
++    mg_framebuffer_snapshot logical{};
++    mg_get_framebuffer_snapshot(&logical);
++    const GLint fbo = integer(GL_DRAW_FRAMEBUFFER_BINDING);
++    const GLint major = integer(GL_MAJOR_VERSION), minor = integer(GL_MINOR_VERSION);
++    const bool level_queries = major > 3 || (major == 3 && minor >= 1);
++    const bool indexed_blend = major > 3 || (major == 3 && minor >= 2);
++    GLint viewport[4] = {};
++    GLES.glGetIntegerv(GL_VIEWPORT, viewport);
++    record("[MG-VRM] sample=%u ctx=%llu program=%u vao=%u mode=0x%x count=%d type=0x%x logicalFbo=%u driverFbo=%d viewport=%d,%d,%d,%d es=%d.%d",
++          sample, g_current_ctx->id, program, key.vao, mode, count, type,
++          logical.draw_fbo, fbo, viewport[0], viewport[1], viewport[2], viewport[3], major, minor);
++    uniforms(program, sample);
++    const bool srgb_control = g_gles_caps.GL_EXT_sRGB_write_control != 0;
++    record("[MG-VRM] sample=%u framebufferSrgbLogical=%d srgbWriteControl=%d framebufferSrgbDriver=%d",
++          sample, mg_enable_get(GL_FRAMEBUFFER_SRGB, 0), srgb_control,
++          srgb_control ? GLES.glIsEnabled(GL_FRAMEBUFFER_SRGB) : -1);
++    const GLint max_draw = integer(GL_MAX_DRAW_BUFFERS);
++    for (unsigned i = 0; i < 4 && static_cast<GLint>(i) < max_draw; ++i) {
++        const GLint buffer = integer(GL_DRAW_BUFFER0 + i);
++        GLint object_type = GL_NONE, object = 0, encoding = 0;
++        if (buffer != GL_NONE) {
++            GLES.glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, buffer,
++                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &object_type);
++            if (object_type != GL_NONE) {
++                GLES.glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, buffer,
++                    GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &encoding);
++                if (fbo != 0) GLES.glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, buffer,
++                    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &object);
++            }
++        }
++        record("[MG-VRM] sample=%u output=%u logical=0x%x driver=0x%x logicalCAiPhysical=0x%x objectType=0x%x object=%d encoding=0x%x",
++              sample, i, logical.draw_buffers[i], buffer, logical.color_attachments[i], object_type, object, encoding);
++        if (indexed_blend && GLES.glIsEnabledi && GLES.glGetIntegeri_v && GLES.glGetBooleani_v) {
++            GLint src = 0, dst = 0, equation = 0;
++            GLboolean mask[4] = {};
++            GLES.glGetIntegeri_v(GL_BLEND_SRC_RGB, i, &src);
++            GLES.glGetIntegeri_v(GL_BLEND_DST_RGB, i, &dst);
++            GLES.glGetIntegeri_v(GL_BLEND_EQUATION_RGB, i, &equation);
++            GLES.glGetBooleani_v(GL_COLOR_WRITEMASK, i, mask);
++            record("[MG-VRM] sample=%u output=%u blend=%d src=0x%x dst=0x%x equation=0x%x colorMask=%d,%d,%d,%d",
++                  sample, i, GLES.glIsEnabledi(GL_BLEND, i), src, dst, equation, mask[0], mask[1], mask[2], mask[3]);
++        }
++    }
++    textures(key, sample, level_queries);
++    record("[MG-VRM] sample=%u vao=%d ibo=%d depth=%d depthFunc=0x%x cull=%d cullMode=0x%x frontFace=0x%x blendGlobal=%d",
++          sample, integer(GL_VERTEX_ARRAY_BINDING), integer(GL_ELEMENT_ARRAY_BUFFER_BINDING),
++          GLES.glIsEnabled(GL_DEPTH_TEST), integer(GL_DEPTH_FUNC), GLES.glIsEnabled(GL_CULL_FACE),
++          integer(GL_CULL_FACE_MODE), integer(GL_FRONT_FACE), GLES.glIsEnabled(GL_BLEND));
++    attributes(sample);
++}
++}
++
++void mg_vrm_diagnostic(GLenum mode, GLsizei count, GLenum type) noexcept {
++    if (!enabled() || stopped.load(std::memory_order_relaxed) || !g_current_ctx) return;
++    if (samples.load(std::memory_order_relaxed) >= limit) {
++        budget_notice("512-samples");
++        return;
++    }
++    try {
++        draw_signature key;
++        if (!signature(key)) return;
++        const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count());
++        bool capped = false;
++        unsigned sample = 0;
++        {
++            std::lock_guard<std::mutex> lock(gate_mutex);
++            sample = gate.claim(g_current_ctx->id, key, now, capped);
++            samples.store(gate.total, std::memory_order_relaxed);
++        }
++        if (capped) record("[MG-VRM] budget=model-state-24 ctx=%llu program=%u vao=%u features=%d", g_current_ctx->id, key.program, key.vao, key.modes[0] != 0);
++        if (sample != 0) capture(mode, count, type, key, sample);
++    } catch (...) {
++        budget_notice("allocation-failed");
++    }
++}
+--- /dev/null
++++ b/MobileGlues-cpp/gl/vrm_diagnostics.h
+@@ -0,0 +1,7 @@
++// Modified for FCL Quest VR on 2026-11-13: bounded per-model VRM and mip diagnostics.
++// Copyright (c) 2026 FCL Quest contributors
++// SPDX-License-Identifier: LGPL-2.1-only
++#pragma once
++#include <GL/gl.h>
++
++void mg_vrm_diagnostic(GLenum mode, GLsizei count, GLenum type) noexcept;
+--- a/MobileGlues-cpp/gles/loader.h
++++ b/MobileGlues-cpp/gles/loader.h
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: preserve backend errors in opt-in diagnostics.
+ // MobileGlues - gles/loader.h
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -35,6 +36,8 @@
+ extern "C"
+ {
+ #endif
++
++    GLenum mg_read_backend_error();
+ 
+     void* proc_address(void* lib, const char* name);
+     extern void *gles, *egl;
+@@ -96,30 +99,30 @@
+     }
+ 
+ #define CLEAR_GL_ERROR                                                                                                 \
+-    GLenum ERR = GLES.glGetError();                                                                                    \
++    GLenum ERR = mg_read_backend_error();                                                                                    \
+     while (ERR != GL_NO_ERROR)                                                                                         \
+-        ERR = GLES.glGetError();
++        ERR = mg_read_backend_error();
+ 
+ #define CLEAR_GL_ERROR_NO_INIT                                                                                         \
+-    ERR = GLES.glGetError();                                                                                           \
++    ERR = mg_read_backend_error();                                                                                           \
+     while (ERR != GL_NO_ERROR)                                                                                         \
+-        ERR = GLES.glGetError();
++        ERR = mg_read_backend_error();
+ 
+ #if GLOBAL_DEBUG
+ #define CHECK_GL_ERROR                                                                                                 \
+-    GLenum ERR = GLES.glGetError();                                                                                    \
++    GLenum ERR = mg_read_backend_error();                                                                                    \
+     while (ERR != GL_NO_ERROR) {                                                                                       \
+         LOG_E("ERROR: %d @ %s:%d", ERR, __FILE__, __LINE__)                                                            \
+-        ERR = GLES.glGetError();                                                                                       \
++        ERR = mg_read_backend_error();                                                                                       \
+     }
+ 
+ #define INIT_CHECK_GL_ERROR GLenum ERR = GL_NO_ERROR;
+ 
+ #define CHECK_GL_ERROR_NO_INIT                                                                                         \
+-    ERR = GLES.glGetError();                                                                                           \
++    ERR = mg_read_backend_error();                                                                                           \
+     while (ERR != GL_NO_ERROR) {                                                                                       \
+         LOG_E("ERROR: %d @ %s:%d", ERR, __FILE__, __LINE__)                                                            \
+-        ERR = GLES.glGetError();                                                                                       \
++        ERR = mg_read_backend_error();                                                                                       \
+     }
+ #else
+ #define CHECK_GL_ERROR                                                                                                 \
+@@ -144,7 +147,7 @@
+ #define NATIVE_FUNCTION_END(type, name, ...)                                                                           \
+     LOG_D("Use native function: %s @ %s(...)", RENDERERNAME, __FUNCTION__);                                            \
+     type ret = GLES.name(__VA_ARGS__);                                                                                 \
+-    GLenum ERR = GLES.glGetError();                                                                                    \
++    GLenum ERR = mg_read_backend_error();                                                                                    \
+     if (ERR != GL_NO_ERROR) LOG_E("ERROR: %d", ERR)                                                                    \
+     return ret;                                                                                                        \
+     }
 --- a/MobileGlues-cpp/glx/lookup.cpp
 +++ b/MobileGlues-cpp/glx/lookup.cpp
 @@ -4,6 +4,7 @@
@@ -1148,3 +4039,18 @@
 -}
 \ No newline at end of file
 +}
+--- a/MobileGlues-cpp/main.cpp
++++ b/MobileGlues-cpp/main.cpp
+@@ -1,3 +1,4 @@
++// Modified for FCL Quest VR on 2026-11-13: identify the local compatibility build.
+ // MobileGlues - main.cpp
+ // Copyright (c) 2025-2026 MobileGL-Dev
+ // Licensed under the GNU Lesser General Public License v2.1:
+@@ -60,6 +61,7 @@
+     start_log();
+ 
+     LOG_V("Initializing %s ...", RENDERERNAME);
++    LOG_V("[MobileGlues] FCL build: vrm-mipmap-20261113-2 (upstream fcdf914)");
+     show_license();
+ 
+     init_settings();

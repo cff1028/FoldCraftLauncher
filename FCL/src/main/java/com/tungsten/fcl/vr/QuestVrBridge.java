@@ -1,6 +1,7 @@
 package com.tungsten.fcl.vr;
 
 import android.app.Activity;
+import android.content.Context;
 import android.os.Build;
 import android.system.Os;
 import android.util.Log;
@@ -50,7 +51,8 @@ public final class QuestVrBridge {
             Files.write(new File(directory, "config.json").toPath(), config.getBytes(StandardCharsets.UTF_8));
             Os.setenv("MG_DIR_PATH", directory.getAbsolutePath(), true);
             Os.setenv("POJAVEXEC_EGL", "libmobileglues.so", true);
-            nativeInitialize(activity);
+            if (!nativeInitialize(activity, activity.getApplicationContext()))
+                throw new IllegalStateException("Cannot replace the Android Activity owned by OpenXR");
             activeRenderer = rendererId;
             Log.i(TAG, "Android bridge ready: " + rendererId + " on " + Build.MODEL);
         } catch (Exception e) {
@@ -66,10 +68,11 @@ public final class QuestVrBridge {
         Log.i(TAG, "Activity destroyed; reference retained until OpenXR releases its lease");
     }
 
-    public static synchronized void bindImmersiveActivity(Activity activity) {
+    public static synchronized boolean bindImmersiveActivity(Activity activity) {
         if (activeRenderer == null) throw new IllegalStateException("VR startup has not been prepared");
-        nativeInitialize(activity);
+        if (!nativeInitialize(activity, activity.getApplicationContext())) return false;
         Log.i(TAG, "Immersive Activity bound to the running game");
+        return true;
     }
 
     @Keep
@@ -97,7 +100,8 @@ public final class QuestVrBridge {
     }
 
     public static native void nativeSetFlatSurface(Surface surface);
+    static native boolean nativeIsFlatFrameReady();
     public static native void nativeSetImmersive(boolean immersive);
 
-    private static native void nativeInitialize(Activity activity);
+    private static native boolean nativeInitialize(Activity activity, Context application);
 }

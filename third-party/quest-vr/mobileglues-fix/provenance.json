@@ -1,26 +1,91 @@
 {
-  "description": "MobileGlues 2.0.1 Dev1 with Minecraft 26.3 and FCL Quest VR compatibility fixes",
-  "source_change": "Official uniform tokenization/default-value fixes and context fallback at fcdf914. Local shader-source count/length, object/argument and error guards retained; procedure lookup remains scoped to the renderer. Uniform defaults belong to the EGL share group, track submitted and successfully compiled sources separately, respect deferred shader deletion and dynamically enumerate attachments. Defaults are restored after successful linking through GLES program-uniform functions without changing the current program or consuming pending errors.",
+  "description": "MobileGlues 2.0.1 Dev1 with FCL Quest VR, Minecraft 26.3 depth storage/upload, VRM API and sRGB mipmap compatibility fixes",
+  "source_change": "Official uniform tokenization/default-value fixes and context fallback at fcdf914. Local shader-source count/length, object/argument and error guards retained; procedure lookup remains scoped to the renderer. Uniform defaults belong to the EGL share group, track submitted and successfully compiled sources separately, respect deferred shader deletion and dynamically enumerate attachments. Defaults are restored after successful linking through GLES program-uniform functions without changing the current program or consuming pending errors. Desktop depth range uses GLES state with double-domain clamping before float conversion; clear-depth conversion is likewise clamped. Unsized depth allocations use sized storage compatible with depth blits. Depth upload conversion preserves client and pixel-unpack-buffer data semantics across GLES storage types. Optional bounded backend diagnostics include independent depth-blit attachment details and are disabled by default. Desktop framebuffer routing/query and GLES sampler capability reporting are corrected. MG_STRICT_ERRORS enables opt-in context-local raw error diagnosis; the default error policy is unchanged. GL_SRGB8 mipmaps use a GLES-compatible intermediate while preserving source texture format and sampling settings. MG_VRM_DIAGNOSTICS records per-model material states and mip levels with bounded budgets, without reading errors.",
   "patched_files": [
     {
       "path": "CMakeLists.txt",
       "original_sha256": "1eca9dbb1fc8919309fc931653c9f51f3f2b80621c4e2ef0957f5e6c74ab407e",
-      "sha256": "8bda03a116052981536dfa1052263a0af26135ac11d8dd6fd5ba66ec256df084"
+      "sha256": "3a436f2850044e561ae6673eb07a1b5795d01f860020e6cfca9d2eb1bc339af5"
     },
     {
       "path": "egl/context.h",
       "original_sha256": "4b18a5266b6dfca2c8f8d88f65b2adfd59e971d9f6a764c70f26c5ca470340b6",
-      "sha256": "98bdd3992d63a71af1e84c72b1c92c2030deaa0205476c17ecf92f623aad67cf"
+      "sha256": "ef59bf39653e9590134023ea2d32e31dbed71d64a3d0d1fbcf4e7e97b7d17462"
+    },
+    {
+      "path": "gl/backend_diagnostics.cpp",
+      "original_sha256": null,
+      "sha256": "aee6058f182135025a049752afd28c8ca3e5a6edbb252c3940f7f3b49f8fefa8"
+    },
+    {
+      "path": "gl/backend_diagnostics.h",
+      "original_sha256": null,
+      "sha256": "396d45974c4b1701ad056288ed4778902159dbdca85ba7f70d7d63a248ed7a9d"
+    },
+    {
+      "path": "gl/buffer.cpp",
+      "original_sha256": "0677cf42b81d0b129374d8aa378f40bf77c00b69a0d7b806f6a365ba8e8fc898",
+      "sha256": "ae78b46854cc97cde786fb31666b63dd5d73a4d265312af56a7b112fdc9f4b5b"
+    },
+    {
+      "path": "gl/depth_upload.cpp",
+      "original_sha256": null,
+      "sha256": "3d21ba0eeff7ac6145aaa50d461620f3467acded930b0a68977e785d76e3ce0f"
+    },
+    {
+      "path": "gl/depth_upload.h",
+      "original_sha256": null,
+      "sha256": "ed0adf6fd9910401df5ecb164c9cc4821e63be44c51a2caa4a26740bbe0f7b02"
+    },
+    {
+      "path": "gl/drawing.cpp",
+      "original_sha256": "ee5d2523174aada84cbeb465efd91a98356e1784fc279377a578da5387dc5192",
+      "sha256": "d40fb870db34bf793b25acd70663c01179cbdd96c12e53cbe91bebac7ccfc781"
+    },
+    {
+      "path": "gl/enable.cpp",
+      "original_sha256": "6ebacaa60c0b86c6482593c8a92043c7c5030609094c8cb477e6a629ff54482d",
+      "sha256": "c08f3aa5a2699ed46b570b0ac3b0b9daf62cc973a68ced781d1755b7592834ee"
+    },
+    {
+      "path": "gl/framebuffer.cpp",
+      "original_sha256": "35432e809fdc0a1c6fa22b2ce5b0b60b131c505ab2d2d1acf9d708f54ad733cf",
+      "sha256": "59096b3c59dc6276ae5a5f68b0c472046a4ac3664e4c200d8899f6a98dcd0b4b"
+    },
+    {
+      "path": "gl/framebuffer.h",
+      "original_sha256": "3f922c28b5e0d724ba0c31fa61253592ad23a723d8b55cf30ee13d465b756cd6",
+      "sha256": "a4a42daca7e67f3172659394d18dbd40e728d0b25a21da796d6019205d3668b8"
     },
     {
       "path": "gl/getter.cpp",
       "original_sha256": "9127f5a2ffc0429a705c80b917f4c02abc9d3621ff0e6572397cdfdef047ae5f",
-      "sha256": "076c60842bc90d6b66a36f1d35091d3447a9d4f300320f6a7b055bc39948a920"
+      "sha256": "b28f33641588af626336bc393ba20d0e28d827bca5310f5519d675812df352da"
+    },
+    {
+      "path": "gl/gl.cpp",
+      "original_sha256": "98c93c72fce1032e165e9736beff8c62b19289e5c59c151408f0d93f4076e157",
+      "sha256": "53599f24ccc066c01410d12868ce5cdf6b12fe8a4009462bd6f445ae94e8e304"
     },
     {
       "path": "gl/gl_native.cpp",
       "original_sha256": "56dec4f2228668b76da8d04d3a8bd6305d2c0e141916b35d87b93031f29f834b",
-      "sha256": "a5a7e3630c52e34499ffc0a88cc5ff8e4e3c6e1bc3c7c16ea661d7e810bb6a80"
+      "sha256": "68a820b436cdd2f851888993231ca805ef644eb39f4890baa36f274efadad188"
+    },
+    {
+      "path": "gl/gl_stub.cpp",
+      "original_sha256": "1f198c60a9ed692470473a0384da5a6bad7dac82202831cbde34a668827106e0",
+      "sha256": "7bfd36aa5b089ef47f8b854d192d33e815b7d5a7c7bf4e6a83183cc6768ce8f2"
+    },
+    {
+      "path": "gl/mg.h",
+      "original_sha256": "28eb2d1b41ece0574043d7c5583de5e1f141d18c4ddd50f6798d5e86b06c77aa",
+      "sha256": "7ee50795c31a70dd51f4dffbaf4d235cc69a4aef5f10bd56357172af80a6c790"
+    },
+    {
+      "path": "gl/multidraw.cpp",
+      "original_sha256": "c73aeb0a6ae6ede67de05f641ab2c021b4d611288eacadc82afd1cd0ded50e6f",
+      "sha256": "0f894e3a781701e4eca99249efa44ba08cbdaa0da3130d6eb3becf91149d3854"
     },
     {
       "path": "gl/program.cpp",
@@ -48,9 +113,49 @@
       "sha256": "cc65420bee1bc1e9fe741c99a46d78364d125b7f881f7a3b922d3bebb472ea85"
     },
     {
+      "path": "gl/srgb_mipmap.cpp",
+      "original_sha256": null,
+      "sha256": "c7c5e1b8d39a71609ef00bb632c4ee6f19f10909c8b462f0259f300f7ac07d8b"
+    },
+    {
+      "path": "gl/srgb_mipmap.h",
+      "original_sha256": null,
+      "sha256": "2d8a74df00d0cd4fe58fdf5f88bd33326e34741a690f689445c9f5f44175cad0"
+    },
+    {
+      "path": "gl/texture.cpp",
+      "original_sha256": "36b0a9569ece03974f26303f6346fd93b653ce13200264600c49d942374cd0d4",
+      "sha256": "6289fc0946eb1d9db764c4c1e1cd1766010b6260c2f59aaef64d8971e3550893"
+    },
+    {
+      "path": "gl/transfer.cpp",
+      "original_sha256": "55a6e4815b81df6f41e0e17f6e67dd21d1f12e56d7f90302cbab77129b401a73",
+      "sha256": "1c5100bb829b2d1944c2e4a11f25ffde389b737e9f3c4246201ee597f3638ed3"
+    },
+    {
+      "path": "gl/vrm_diagnostics.cpp",
+      "original_sha256": null,
+      "sha256": "6908de688fcb1069a3139229d94a2b0a81a3903858c1d87cdddb3ada2e812c43"
+    },
+    {
+      "path": "gl/vrm_diagnostics.h",
+      "original_sha256": null,
+      "sha256": "fd68392f9bd92f9d2083f1a900e538b7630f667e68d12e3b1b1947dabe9b1515"
+    },
+    {
+      "path": "gles/loader.h",
+      "original_sha256": "27026245c0d6285e69eed41321861d556e8640a3b09ce9e97740c1d10dcb5318",
+      "sha256": "8f83d881640004cd5c2682160e810444c00cf4ee8359c115ed19f16f37a0f8b3"
+    },
+    {
       "path": "glx/lookup.cpp",
       "original_sha256": "894fb518435e7de0b4233301851282e42a7bf078f9ed8097aa9ef9d3fb345715",
       "sha256": "eab1ee9b4ee56da3998eb259876eb96af5c13e52ff3aab8217ece9f39470bc92"
+    },
+    {
+      "path": "main.cpp",
+      "original_sha256": "b92ba23e07a5c109f75e9e360c2a35d201a6263daab719a4f04d3fe051170ef9",
+      "sha256": "37460b049bc44e33fb2086247cd0d8345c3ed78d37fcaaa57b67ea5308bc9805"
     }
   ],
   "sources": [
@@ -118,10 +223,11 @@
   },
   "library": {
     "name": "libmobileglues.so",
-    "size": 6468856,
-    "sha256": "fc768f95c8d6018072e2676071f400fc30fbf86948e5bc7706e801b9fb79c3b3"
+    "size": 6528552,
+    "sha256": "d4b79f0728af69ab114940957d37638bdc8c8f03365e14207d1e3a83f5d99695"
   },
   "patches": [
     "mobileglues-quest-compat.patch"
-  ]
+  ],
+  "local_build": "vrm-mipmap-20261113-2"
 }

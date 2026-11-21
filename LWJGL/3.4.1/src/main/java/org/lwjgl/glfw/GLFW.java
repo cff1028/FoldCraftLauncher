@@ -559,6 +559,8 @@ public class GLFW
     public static boolean mGLFWIsInputReady;
     private static boolean mGLFWInputPumping;
     private static boolean mGLFWWindowVisibleOnCreation = true;
+    private static final boolean QUEST_VULKAN = "1".equals(System.getenv("FCL_VR_VULKAN"));
+    private static boolean questNoApiHint;
     public static final ByteBuffer keyDownBuffer = ByteBuffer.allocateDirect(318);
     public static final ByteBuffer mouseDownBuffer = ByteBuffer.allocateDirect(8);
 
@@ -627,6 +629,8 @@ public class GLFW
     private static native long nglfwSetScrollCallback(long window, long ptr);
     // private static native void nglfwSetInputReady();
     private static native void nglfwSetShowingWindow(long window);
+    private static native long nglfwCreateQuestVulkanWindow(int width, int height, long[] owner);
+    private static native void nglfwDestroyQuestVulkanWindow(long owner);
 
     /*
      private static void priGlfwSetError(int error) {
@@ -884,6 +888,13 @@ public class GLFW
     }
 
     public static void glfwTerminate() {
+        if (QUEST_VULKAN) {
+            for (int i = mGLFWWindowMap.size() - 1; i >= 0; i--) {
+                if (mGLFWWindowMap.valueAt(i).questWindowOwner != 0)
+                    glfwDestroyWindow(mGLFWWindowMap.keyAt(i));
+            }
+            questNoApiHint = false;
+        }
         mGLFWIsInputReady = false;
         CallbackBridge.nativeSetInputReady(false);
 
@@ -1078,11 +1089,13 @@ public class GLFW
     }
 
     public static void glfwMakeContextCurrent(@NativeType("GLFWwindow *") long window) {
+        if (isQuestNoApiWindow(window)) return;
         long __functionAddress = Functions.MakeContextCurrent;
         invokePV(window, __functionAddress);
     }
 
     public static void glfwSwapBuffers(@NativeType("GLFWwindow *") long window) {
+        if (isQuestNoApiWindow(window)) return;
         long __functionAddress = Functions.SwapBuffers;
         invokePV(window, __functionAddress);
     }
@@ -1116,9 +1129,26 @@ public class GLFW
     public static long nglfwCreateContext(long share) {
         return invokePP(share, Functions.CreateContext);
     }
+
+    private static boolean isQuestNoApiWindow(long window) {
+        if (!QUEST_VULKAN || window == 0) return false;
+        GLFWWindowProperties properties = mGLFWWindowMap.get(window);
+        return properties != null && properties.questWindowOwner != 0;
+    }
+
     public static long glfwCreateWindow(int width, int height, CharSequence title, long monitor, long share) {
-        // Create an ACTUAL EGL context
-        long ptr = nglfwCreateContext(share);
+        if (isQuestNoApiWindow(share)) return 0;
+        GLFWWindowProperties win = new GLFWWindowProperties();
+        long ptr;
+        if (questNoApiHint) {
+            // The panel and the eyes have their own lifetimes. GLFW still needs a stable window for input.
+            if (share != 0) return 0;
+            long[] owner = new long[1];
+            ptr = nglfwCreateQuestVulkanWindow(width, height, owner);
+            win.questWindowOwner = owner[0];
+        } else {
+            ptr = nglfwCreateContext(share);
+        }
         if (ptr == 0) {
             // Context creation failed, aborting instead of calling into the GL driver
             // without a current context (which may SIGSEGV inside the renderer)
@@ -1126,7 +1156,6 @@ public class GLFW
             return 0;
         }
         //nativeEglMakeCurrent(ptr);
-        GLFWWindowProperties win = new GLFWWindowProperties();
         // win.width = width;
         // win.height = height;
 
@@ -1208,8 +1237,11 @@ public class GLFW
 //            // We finished getting the driver info, we can return it back to its original state now
 //            glfwMakeContextCurrent(oldPtr);
 //        }
-        win.windowAttribs.put(GLFW_CONTEXT_VERSION_MAJOR, glMajor);
-        win.windowAttribs.put(GLFW_CONTEXT_VERSION_MINOR, glMinor);
+        if (win.questWindowOwner == 0) {
+            win.windowAttribs.put(GLFW_CONTEXT_VERSION_MAJOR, glMajor);
+            win.windowAttribs.put(GLFW_CONTEXT_VERSION_MINOR, glMinor);
+        }
+        if (QUEST_VULKAN) win.windowAttribs.put(GLFW_CLIENT_API, questNoApiHint ? GLFW_NO_API : GLFW_OPENGL_API);
         mGLFWWindowMap.put(ptr, win);
         mainContext = ptr;
 
@@ -1226,8 +1258,9 @@ public class GLFW
     public static void glfwDestroyWindow(long window) {
         // Check window exists
         try {
-            internalGetWindow(window);
+            GLFWWindowProperties win = internalGetWindow(window);
             mGLFWWindowMap.remove(window);
+            if (win.questWindowOwner != 0) nglfwDestroyQuestVulkanWindow(win.questWindowOwner);
         } catch (IllegalArgumentException e) {
             System.out.println("GLFW: Warning: failed to remove window " + window);
             e.printStackTrace();
@@ -1241,6 +1274,7 @@ public class GLFW
 
     public static void glfwDefaultWindowHints() {
         mGLFWWindowVisibleOnCreation = true;
+        if (QUEST_VULKAN) glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
     }
 
     public static void glfwGetWindowSize(long window, IntBuffer width, IntBuffer height) {
@@ -1304,6 +1338,10 @@ public class GLFW
     }
 
     public static void glfwWindowHint(int hint, int value) {
+        if (QUEST_VULKAN && hint == GLFW_CLIENT_API) {
+            questNoApiHint = value == GLFW_NO_API;
+            if (questNoApiHint) return;
+        }
         if (hint == GLFW_VISIBLE) {
             mGLFWWindowVisibleOnCreation = value == GLFW_TRUE;
             return;

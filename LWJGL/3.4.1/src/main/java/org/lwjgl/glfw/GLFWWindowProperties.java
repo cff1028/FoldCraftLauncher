@@ -3,6 +3,7 @@ package org.lwjgl.glfw;
 import java.util.*;
 
 public class GLFWWindowProperties {
+    long questWindowOwner;
     public int width = GLFW.mGLFWWindowWidth;
     public int height = GLFW.mGLFWWindowHeight;
     public int x, y;

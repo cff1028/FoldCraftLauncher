@@ -341,7 +341,7 @@ class LauncherHelper(
                 launchRenderer
             )
         val launcher = FCLGameLauncher(context, repository, version, authInfo, launchOptions)
-        launcher.setVrEnabled(vrEnabled)
+        launcher.setVrEnabled(vrEnabled, setting.graphicsBackend)
         launcher.setVrGraphicsSettings(setting.vrRenderScalePercent, setting.vrFsaaEnabled)
         launcher.setVrStereoSyncEnabled(setting.vrStereoSyncEnabled)
 
@@ -392,7 +392,11 @@ class LauncherHelper(
         checkMod(fclBridge, gameVersion, scannedMods)
 
         val gameOption = GameOption(repository.getRunDirectory(selectedVersion).absolutePath)
-        var graphicsBackend = if (vrEnabled) "opengl" else setting.graphicsBackend
+        var graphicsBackend = when {
+            fclBridge.launchConfig.isVrVulkanEnabled -> "vulkan"
+            vrEnabled -> "opengl"
+            else -> setting.graphicsBackend
+        }
         if (graphicsBackend == "default" && renderer.isEqual(Renderer.ID_MOBILEGLUES)) {
             graphicsBackend = "opengl"
             LOG.info("Built-in MobileGlues selected: skipping the default Vulkan probe")

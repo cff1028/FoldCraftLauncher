@@ -1,11 +1,17 @@
 package com.mio.plugin
 
 import android.content.Context
+import android.os.Build
+import android.system.Os
+import android.system.OsConstants
+import com.tungsten.fcl.vr.QuestVrFeatures
+import java.io.File
 
 object DriverPlugin : AbstractPlugin<DriverPlugin.Driver>() {
 
     /** 内置 Turnip 的驱动库文件名，也是插件未声明 driver_lib 时的默认值 */
     const val DEFAULT_DRIVER_LIB = "libvulkan_freedreno.so"
+    private const val QUEST_3_DRIVER_LIB = "libvulkan_turnip_quest.so"
 
     /** 驱动适配的 GPU 家族（插件 metaData driver_gpu），门控自定义驱动加载路径 */
     const val GPU_ADRENO = "adreno"
@@ -33,7 +39,12 @@ object DriverPlugin : AbstractPlugin<DriverPlugin.Driver>() {
         get() = items
 
     override fun onInit(context: Context) {
-        items.add(Driver("Turnip", context.applicationInfo.nativeLibraryDir))
+        val directory = context.applicationInfo.nativeLibraryDir
+        val useQuestDriver = QuestVrFeatures.isQuest3Family() &&
+                Build.VERSION.SDK_INT >= 29 && Os.sysconf(OsConstants._SC_PAGESIZE) == 4096L &&
+                File(directory, QUEST_3_DRIVER_LIB).isFile
+        val library = if (useQuestDriver) QUEST_3_DRIVER_LIB else DEFAULT_DRIVER_LIB
+        items.add(Driver("Turnip", directory, library))
         selected = items.first()
     }
 

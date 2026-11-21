@@ -174,7 +174,11 @@ public final class QuestVrSession implements FCLBridgeCallback {
         if (exiting.get() || !gate.wantsImmersive()) return false;
         try {
             restoreLaunchMetadata(activity);
-            QuestVrBridge.bindImmersiveActivity(activity);
+            if (!QuestVrBridge.bindImmersiveActivity(activity)) {
+                onLog("[FCL-QuestVR] The previous Activity is still owned by OpenXR. Release the old XR instance before binding the replacement.\n");
+                onOpenXrStopped();
+                return false;
+            }
             immersive = new WeakReference<>(activity);
             hasImmersiveActivity = true;
             return true;
@@ -217,9 +221,9 @@ public final class QuestVrSession implements FCLBridgeCallback {
 
     public void onOpenXrStopped() {
         if (exiting.get()) return;
-        boolean changed = gate.flat();
+        if (!gate.flat()) return;
         QuestVrBridge.nativeSetImmersive(false);
-        if (changed) onLog("[FCL-QuestVR] OpenXR stopped; returning the running game to Quest Home.\n");
+        onLog("[FCL-QuestVR] OpenXR presentation stopped; returning the running game to Quest Home.\n");
         main.post(() -> {
             if (!isFlat()) return;
             handoffLaunched = false;
@@ -288,7 +292,7 @@ public final class QuestVrSession implements FCLBridgeCallback {
     public void onFirstFlatFrame() {
         main.post(() -> {
             GameMenu menu = flatMenu.get();
-            if (!exiting.get() && menu != null) menu.onGraphicOutput();
+            if (!exiting.get() && menu != null && QuestVrBridge.nativeIsFlatFrameReady()) menu.onGraphicOutput();
         });
     }
 

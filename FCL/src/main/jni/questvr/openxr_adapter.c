@@ -1,8 +1,10 @@
 #include <jni.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+#include <vulkan/vulkan.h>
 #define XR_USE_PLATFORM_ANDROID
 #define XR_USE_GRAPHICS_API_OPENGL_ES
+#define XR_USE_GRAPHICS_API_VULKAN
 #include "openxr/openxr.h"
 #include "openxr/openxr_platform.h"
 #include "interop.h"
@@ -30,21 +32,23 @@ static PFN_xrDestroySwapchain real_destroy_swapchain;
 static PFN_xrReleaseSwapchainImage real_release_image;
 static pthread_once_t loader_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t chain_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t fade_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t session_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct fade_instance_info {
     XrInstance instance;
     struct fade_instance_info *next;
 } fade_instance_info;
-typedef struct fade_session_info {
+typedef struct session_info {
     XrSession session;
     XrInstance instance;
     quest_vr_fade_state state;
     bool fade_enabled;
-    struct fade_session_info *next;
-} fade_session_info;
+    bool uses_gles;
+    bool uses_vulkan;
+    struct session_info *next;
+} session_info;
 static fade_instance_info *fade_instances;
-static fade_session_info *fade_sessions;
+static session_info *sessions;
 
 typedef struct swapchain_info {
     XrSwapchain handle;
@@ -55,8 +59,15 @@ typedef struct swapchain_info {
 } swapchain_info;
 static swapchain_info *chains;
 
+static void return_to_panel_if_idle(void) {
+    pthread_mutex_lock(&session_mutex);
+    bool idle = sessions == NULL;
+    pthread_mutex_unlock(&session_mutex);
+    if (idle) quest_vr_notify_openxr_stopped();
+}
+
 static XrResult instance_result(XrResult result) {
-    if (XR_FAILED(result)) quest_vr_notify_openxr_stopped();
+    if (XR_FAILED(result)) return_to_panel_if_idle();
     return result;
 }
 
@@ -104,10 +115,10 @@ static void remember_fade_instance(XrInstance instance) {
     fade_instance_info *entry = calloc(1, sizeof(*entry));
     if (!entry) return;
     entry->instance = instance;
-    pthread_mutex_lock(&fade_mutex);
+    pthread_mutex_lock(&session_mutex);
     entry->next = fade_instances;
     fade_instances = entry;
-    pthread_mutex_unlock(&fade_mutex);
+    pthread_mutex_unlock(&session_mutex);
 }
 
 static XrResult XRAPI_PTR adapted_create_instance(const XrInstanceCreateInfo *info, XrInstance *instance) {
@@ -147,15 +158,22 @@ static XrResult XRAPI_PTR adapted_create_instance(const XrInstanceCreateInfo *in
     return create_instance_result(result);
 }
 
-static void forget_fade_session(XrSession session) {
-    pthread_mutex_lock(&fade_mutex);
-    fade_session_info **slot = &fade_sessions;
+static bool forget_session(XrSession session) {
+    bool vulkan = false;
+    pthread_mutex_lock(&session_mutex);
+    session_info **slot = &sessions;
     while (*slot) {
-        fade_session_info *entry = *slot;
-        if (entry->session == session) { *slot = entry->next; free(entry); break; }
+        session_info *entry = *slot;
+        if (entry->session == session) {
+            vulkan = entry->uses_vulkan;
+            *slot = entry->next;
+            free(entry);
+            break;
+        }
         slot = &entry->next;
     }
-    pthread_mutex_unlock(&fade_mutex);
+    pthread_mutex_unlock(&session_mutex);
+    return vulkan;
 }
 
 static void forget_session_chains(XrInstance instance, XrSession session) {
@@ -177,22 +195,22 @@ static XrResult XRAPI_PTR adapted_destroy_instance(XrInstance instance) {
     if (XR_SUCCEEDED(result)) {
         quest_vr_stereo_forget(instance, XR_NULL_HANDLE);
         forget_session_chains(instance, XR_NULL_HANDLE);
-        pthread_mutex_lock(&fade_mutex);
+        pthread_mutex_lock(&session_mutex);
         fade_instance_info **instance_slot = &fade_instances;
         while (*instance_slot) {
             fade_instance_info *entry = *instance_slot;
             if (entry->instance == instance) { *instance_slot = entry->next; free(entry); break; }
             instance_slot = &entry->next;
         }
-        fade_session_info **session_slot = &fade_sessions;
+        session_info **session_slot = &sessions;
         while (*session_slot) {
-            fade_session_info *entry = *session_slot;
+            session_info *entry = *session_slot;
             if (entry->instance == instance) { *session_slot = entry->next; free(entry); }
             else session_slot = &entry->next;
         }
-        pthread_mutex_unlock(&fade_mutex);
+        pthread_mutex_unlock(&session_mutex);
         quest_vr_openxr_instance_destroyed();
-        quest_vr_notify_openxr_stopped();
+        return_to_panel_if_idle();
     }
     return result;
 }
@@ -200,9 +218,16 @@ static XrResult XRAPI_PTR adapted_destroy_instance(XrInstance instance) {
 static XrResult XRAPI_PTR adapted_create_session(XrInstance instance, const XrSessionCreateInfo *info,
                                                 XrSession *session) {
     const XrGraphicsBindingOpenGLESAndroidKHR *binding = NULL;
+    const XrGraphicsBindingVulkanKHR *vulkan = NULL;
     const XrBaseInStructure *next = info ? info->next : NULL;
     while (next) {
         if (next->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR) {
+            const char *requested = getenv("FCL_VR_VULKAN");
+            if (requested && !strcmp(requested, "1")) {
+                __android_log_print(ANDROID_LOG_ERROR, "FCL-QuestVR",
+                                    "Vulkan VR requested but the mod supplied an OpenGL ES session binding");
+                return instance_result(XR_ERROR_GRAPHICS_DEVICE_INVALID);
+            }
             binding = (const void *) next;
             if (binding->context == EGL_NO_CONTEXT || binding->display == EGL_NO_DISPLAY ||
                 eglGetCurrentContext() != binding->context || eglGetCurrentDisplay() != binding->display) {
@@ -212,25 +237,44 @@ static XrResult XRAPI_PTR adapted_create_session(XrInstance instance, const XrSe
             }
             break;
         }
+        // XR_KHR_vulkan_enable2 aliases the original binding type and structure.
+        if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+            vulkan = (const void *) next;
+            if (!vulkan->instance || !vulkan->physicalDevice || !vulkan->device) {
+                __android_log_print(ANDROID_LOG_ERROR, "FCL-QuestVR", "Incomplete OpenXR Vulkan graphics binding");
+                return instance_result(XR_ERROR_GRAPHICS_DEVICE_INVALID);
+            }
+            break;
+        }
         next = next->next;
     }
-    XrResult result = real_create_session(instance, info, session);
-    if (XR_SUCCEEDED(result)) {
-        pthread_mutex_lock(&fade_mutex);
-        bool enabled = false;
-        for (fade_instance_info *entry = fade_instances; entry; entry = entry->next)
-            if (entry->instance == instance) { enabled = true; break; }
-        fade_session_info *entry = calloc(1, sizeof(*entry));
-        if (entry) {
-            entry->instance = instance;
-            entry->session = *session;
-            entry->fade_enabled = enabled;
-            entry->next = fade_sessions;
-            fade_sessions = entry;
-        }
-        pthread_mutex_unlock(&fade_mutex);
-        if (binding) quest_vr_stereo_session(instance, *session, binding->display, binding->context);
+    // The mod can keep the enable2 instance/device while presenting to the flat panel.
+    // A new session on that instance must resume the owning Activity again.
+    if (vulkan && !quest_vr_await_vulkan_activity()) {
+        __android_log_print(ANDROID_LOG_ERROR, "FCL-QuestVR", "Cannot resume the Activity for the Vulkan session");
+        return instance_result(XR_ERROR_INITIALIZATION_FAILED);
     }
+    session_info *entry = calloc(1, sizeof(*entry));
+    if (!entry) return instance_result(XR_ERROR_OUT_OF_MEMORY);
+    XrResult result = real_create_session(instance, info, session);
+    if (vulkan)
+        __android_log_print(XR_SUCCEEDED(result) ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, "FCL-QuestVR",
+                            "OpenXR Vulkan session: xrInstance=%p system=%llu device=%p queue=%u:%u xrCreateSession=%d",
+                            (void *) instance, (unsigned long long) info->systemId, (void *) vulkan->device,
+                            vulkan->queueFamilyIndex, vulkan->queueIndex, (int) result);
+    if (XR_SUCCEEDED(result)) {
+        entry->instance = instance;
+        entry->session = *session;
+        entry->uses_gles = binding != NULL;
+        entry->uses_vulkan = vulkan != NULL;
+        pthread_mutex_lock(&session_mutex);
+        for (fade_instance_info *owner = fade_instances; owner; owner = owner->next)
+            if (owner->instance == instance) { entry->fade_enabled = true; break; }
+        entry->next = sessions;
+        sessions = entry;
+        pthread_mutex_unlock(&session_mutex);
+        if (binding) quest_vr_stereo_session(instance, *session, binding->display, binding->context);
+    } else free(entry);
     return instance_result(result);
 }
 
@@ -239,7 +283,7 @@ static XrResult XRAPI_PTR adapted_destroy_session(XrSession session) {
     if (XR_SUCCEEDED(result)) {
         quest_vr_stereo_forget(XR_NULL_HANDLE, session);
         forget_session_chains(XR_NULL_HANDLE, session);
-        forget_fade_session(session);
+        if (forget_session(session)) return_to_panel_if_idle();
     }
     return result;
 }
@@ -247,10 +291,10 @@ static XrResult XRAPI_PTR adapted_destroy_session(XrSession session) {
 static XrResult fade_end_frame(XrSession session, const XrFrameEndInfo *info) {
     quest_vr_fade_state state = {0};
     bool tracked = false;
-    pthread_mutex_lock(&fade_mutex);
-    for (fade_session_info *entry = fade_sessions; entry; entry = entry->next)
+    pthread_mutex_lock(&session_mutex);
+    for (session_info *entry = sessions; entry; entry = entry->next)
         if (entry->session == session) { state = entry->state; tracked = entry->fade_enabled; break; }
-    pthread_mutex_unlock(&fade_mutex);
+    pthread_mutex_unlock(&session_mutex);
     if (!tracked || state.complete) return real_end_frame(session, info);
     bool started = state.started;
     quest_vr_fade_frame frame;
@@ -258,10 +302,10 @@ static XrResult fade_end_frame(XrSession session, const XrFrameEndInfo *info) {
     XrResult result = real_end_frame(session, adapted ? &frame.info : info);
     quest_vr_fade_release(&frame);
     if (XR_SUCCEEDED(result)) {
-        pthread_mutex_lock(&fade_mutex);
-        for (fade_session_info *entry = fade_sessions; entry; entry = entry->next)
+        pthread_mutex_lock(&session_mutex);
+        for (session_info *entry = sessions; entry; entry = entry->next)
             if (entry->session == session) { entry->state = state; break; }
-        pthread_mutex_unlock(&fade_mutex);
+        pthread_mutex_unlock(&session_mutex);
         if (adapted && !started)
             __android_log_print(ANDROID_LOG_INFO, "FCL-QuestVR", "OpenXR 300ms compositor fade-in started");
     }
@@ -282,16 +326,25 @@ static XrResult XRAPI_PTR adapted_end_session(XrSession session) {
 
 static XrResult XRAPI_PTR adapted_create_swapchain(XrSession session, const XrSwapchainCreateInfo *info,
                                                   XrSwapchain *swapchain) {
+    // Only GLES swapchains participate in texture import, GL fences and glFlush.
+    // Vulkan images are owned by OpenXR and synchronized on the application's bound queue.
+    XrInstance gles_owner = XR_NULL_HANDLE;
+    pthread_mutex_lock(&session_mutex);
+    for (session_info *owner = sessions; owner; owner = owner->next) {
+        if (owner->session == session) {
+            if (owner->uses_gles) gles_owner = owner->instance;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&session_mutex);
+    swapchain_info *entry = gles_owner ? calloc(1, sizeof(*entry)) : NULL;
+    if (gles_owner && !entry) return XR_ERROR_OUT_OF_MEMORY;
     XrResult result = real_create_swapchain(session, info, swapchain);
     if (XR_SUCCEEDED(result)) {
-        swapchain_info *entry = calloc(1, sizeof(*entry));
         if (entry) {
             entry->handle = *swapchain;
             entry->session = session;
-            pthread_mutex_lock(&fade_mutex);
-            for (fade_session_info *owner = fade_sessions; owner; owner = owner->next)
-                if (owner->session == session) { entry->instance = owner->instance; break; }
-            pthread_mutex_unlock(&fade_mutex);
+            entry->instance = gles_owner;
             entry->width = info->width;
             entry->height = info->height;
             entry->array_size = info->arraySize;
@@ -302,21 +355,22 @@ static XrResult XRAPI_PTR adapted_create_swapchain(XrSession session, const XrSw
         }
         __android_log_print(ANDROID_LOG_INFO, "FCL-QuestVR", "OpenXR swapchain: %ux%u, layers=%u, format=%lld",
                             info->width, info->height, info->arraySize, (long long) info->format);
-    }
+    } else free(entry);
     return result;
 }
 
 static void register_images(XrSwapchain swapchain, uint32_t count, XrSwapchainImageBaseHeader *base) {
     if (!count || base[0].type != XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR) return;
     XrSwapchainImageOpenGLESKHR *images = (void *) base;
-    uint32_t *names = malloc(count * sizeof(*names));
-    if (!names) return;
-    uint32_t array_size = 2;
+    uint32_t array_size = 0;
     pthread_mutex_lock(&chain_mutex);
     for (swapchain_info *entry = chains; entry; entry = entry->next) {
         if (entry->handle == swapchain) { array_size = entry->array_size; break; }
     }
     pthread_mutex_unlock(&chain_mutex);
+    if (!array_size) return;
+    uint32_t *names = malloc((size_t) count * sizeof(*names));
+    if (!names) return;
     for (uint32_t i = 0; i < count; ++i) {
         names[i] = images[i].image;
     }
@@ -354,12 +408,16 @@ static XrResult XRAPI_PTR adapted_enumerate_images(XrSwapchain swapchain, uint32
 static XrResult XRAPI_PTR adapted_destroy_swapchain(XrSwapchain swapchain) {
     XrResult result = real_destroy_swapchain(swapchain);
     if (XR_SUCCEEDED(result)) {
-        quest_vr_forget_images((uint64_t) (uintptr_t) swapchain);
         pthread_mutex_lock(&chain_mutex);
         swapchain_info **slot = &chains;
         while (*slot) {
             swapchain_info *entry = *slot;
-            if (entry->handle == swapchain) { *slot = entry->next; free(entry); break; }
+            if (entry->handle == swapchain) {
+                *slot = entry->next;
+                quest_vr_forget_images((uint64_t) (uintptr_t) swapchain);
+                free(entry);
+                break;
+            }
             slot = &entry->next;
         }
         pthread_mutex_unlock(&chain_mutex);
@@ -373,8 +431,10 @@ static XrResult XRAPI_PTR adapted_release_image(XrSwapchain swapchain, const XrS
     for (swapchain_info *entry = chains; entry; entry = entry->next)
         if (entry->handle == swapchain) { session = entry->session; break; }
     pthread_mutex_unlock(&chain_mutex);
-    quest_vr_stereo_before_release(session);
-    glFlush();
+    if (session) {
+        quest_vr_stereo_before_release(session);
+        glFlush();
+    }
     return real_release_image(swapchain, info);
 }
 

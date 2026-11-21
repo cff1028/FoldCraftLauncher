@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <pthread.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -141,7 +142,7 @@ EXTERNAL_API void *pojavGetCurrentContext() {
     return br_get_current();
 }
 
-// 已加载的 Vulkan 句柄缓存（set_vulkan_ptr 与 loadCustomVulkan 共用，各 ABI 都需要）
+static pthread_once_t g_vulkan_once = PTHREAD_ONCE_INIT;
 static void* g_vulkan_ptr = NULL;
 
 #ifdef CUSTOM_VKDRIVER_POSSIBLE
@@ -206,8 +207,7 @@ bool checkDriverGpu() {
 
 static struct android_namespace_t* vulkanLoaderNs;
 
-void* loadCustomVulkan() {
-    if (g_vulkan_ptr) return g_vulkan_ptr;
+static void* loadCustomVulkan() {
     if (!checkDriverGpu())
         return NULL;
 
@@ -239,42 +239,56 @@ void* loadCustomVulkan() {
 
 #endif
 
-static void set_vulkan_ptr(void* ptr) {
-    g_vulkan_ptr = ptr;
-    char envval[64];
-    sprintf(envval, "%"PRIxPTR, (uintptr_t)ptr);
+static void select_vulkan_loader(void) {
+    const char* preset = getenv("VULKAN_PTR");
+    if (preset != NULL) {
+        g_vulkan_ptr = (void*) (uintptr_t) strtoull(preset, NULL, 16);
+        return;
+    }
+    void* loader = NULL;
+    bool custom = false;
+    if(getenv("VULKAN_DRIVER_SYSTEM") == NULL && android_get_device_api_level() >= 28) {
+#ifdef CUSTOM_VKDRIVER_POSSIBLE
+        loader = loadCustomVulkan();
+        if(loader != NULL) {
+            custom = true;
+            const char* driverLib = getenv("DRIVER_LIB");
+            FCL_LOG("DriverSupp: custom Vulkan loader ready for %s, loader address: %p",
+                    driverLib && *driverLib ? driverLib : "libvulkan_freedreno.so", loader);
+        }
+#endif
+    }
+    if (loader == NULL) {
+        // Preserve the diagnostic loader override supported by the system-driver shim.
+        const char* override_path = getenv("VKSHIM_ENABLE") != NULL ? getenv("VKSHIM_LOADER_PATH") : NULL;
+        if (override_path != NULL && *override_path != '\0') {
+            loader = dlopen(override_path, RTLD_LAZY | RTLD_LOCAL);
+            if (loader == NULL) FCL_LOG("vkshim: unable to load diagnostic loader: %s", dlerror());
+        }
+        if (loader == NULL) loader = dlopen("libvulkan.so", RTLD_LAZY | RTLD_LOCAL);
+        FCL_LOG("OSMDroid: system Vulkan loader %p", loader);
+    }
+    const char* java_surface = getenv("FCL_VK_JAVA_SURFACE");
+    bool enable_surface = java_surface != NULL && strcmp(java_surface, "1") == 0;
+    bool enable_features = !custom && getenv("VKSHIM_ENABLE") != NULL;
+    if (loader != NULL && (enable_surface || enable_features)) {
+        void* shim = dlopen("libvkshim.so", RTLD_LAZY | RTLD_LOCAL);
+        bool (*init)(void*, bool, bool) = shim == NULL ? NULL : dlsym(shim, "fcl_vkshim_init");
+        if (init != NULL && init(loader, enable_surface, enable_features)) {
+            loader = shim;
+        } else {
+            FCL_LOG("vkshim unavailable; using selected Vulkan loader directly");
+            if (shim != NULL) dlclose(shim);
+        }
+    }
+    g_vulkan_ptr = loader;
+    char envval[2 * sizeof(uintptr_t) + 1];
+    snprintf(envval, sizeof(envval), "%"PRIxPTR, (uintptr_t)loader);
     setenv("VULKAN_PTR", envval, 1);
 }
 
 void load_vulkan() {
-    if(getenv("VULKAN_DRIVER_SYSTEM") == NULL && android_get_device_api_level() >= 28) {
-#ifdef CUSTOM_VKDRIVER_POSSIBLE
-        void* result = loadCustomVulkan();
-        if(result != NULL) {
-            const char* driverLib = getenv("DRIVER_LIB");
-            FCL_LOG("DriverSupp: Loaded custom driver (%s), loader address: %p",
-                    driverLib && *driverLib ? driverLib : "libvulkan_freedreno.so", result);
-            set_vulkan_ptr(result);
-            return;
-        }
-#endif
-    }
-    FCL_LOG("OSMDroid: loading vulkan regularly...");
-    // 启动器检测到设备缺失 VK_EXT_vertex_attribute_divisor 且提供 KHR 扩展时
-    // 注入 VKSHIM_ENABLE，此时经 vkshim 包装加载，由 shim 用 KHR 合成 EXT，
-    // LWJGL 与 SDL 统一经 VULKAN_PTR 拿到包装后的加载器；其余设备直连系统加载器
-    void* vulkan_ptr = NULL;
-    if (getenv("VKSHIM_ENABLE") != NULL) {
-        vulkan_ptr = dlopen("libvkshim.so", RTLD_LAZY | RTLD_LOCAL);
-        if (vulkan_ptr == NULL) {
-            FCL_LOG("vkshim unavailable (%s), fallback to system loader", dlerror());
-        }
-    }
-    if (vulkan_ptr == NULL) {
-        vulkan_ptr = dlopen("libvulkan.so", RTLD_LAZY | RTLD_LOCAL);
-    }
-    FCL_LOG("OSMDroid: loaded vulkan, ptr=%p", vulkan_ptr);
-    set_vulkan_ptr(vulkan_ptr);
+    pthread_once(&g_vulkan_once, select_vulkan_loader);
 }
 
 int pojavInitOpenGL() {
@@ -359,6 +373,12 @@ EXTERNAL_API int pojavInit() {
         pojav_environ->savedWidth = 1280;
         pojav_environ->savedHeight = 720;
         updateMonitorSize(1280, 720);
+        if (quest_vr_vulkan_enabled()) {
+            // NO_API windows are created independently of EGL. Only a GL client needs the pbuffer.
+            pojav_environ->config_renderer = RENDERER_GL4ES;
+            set_quest_vr_bridge_tbl();
+            return 1;
+        }
         return pojavInitOpenGL();
     }
     ANativeWindow_acquire(pojav_environ->pojavWindow);
@@ -443,11 +463,13 @@ EXTERNAL_API void *pojavCreateContext(void *contextSrc) {
 }
 
 void *maybe_load_vulkan() {
-    // We use the env var because
-    // 1. it's easier to do that
-    // 2. it won't break if something will try to load vulkan and osmesa simultaneously
-    if (getenv("VULKAN_PTR") == NULL) load_vulkan();
-    return (void *) strtoul(getenv("VULKAN_PTR"), NULL, 0x10);
+    load_vulkan();
+    return g_vulkan_ptr;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tungsten_fclauncher_bridge_FCLBridge_prepareVulkanLoader(JNIEnv *env, jclass clazz) {
+    return maybe_load_vulkan() != NULL;
 }
 
 EXTERNAL_API JNIEXPORT jlong JNICALL

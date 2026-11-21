@@ -5,6 +5,7 @@
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <media/NdkImageReader.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,6 +16,7 @@ static EGLDisplay vr_display = EGL_NO_DISPLAY;
 static __thread gl_render_window_t *vr_current;
 static gl_render_window_t *vr_primary;
 static int flat_swap_interval = 1;
+static bool vulkan_presentation;
 
 typedef struct {
     gl_render_window_t base;
@@ -36,7 +38,8 @@ static void release_flat_surface(quest_vr_window *window) {
 }
 
 static bool prepare_swap_surface(gl_render_window_t *bundle) {
-    if (bundle != vr_primary) return true;
+    // Android permits only one graphics producer on the panel. Auxiliary GL contexts use their pbuffer.
+    if (vulkan_presentation || bundle != vr_primary) return true;
     quest_vr_window *window = (quest_vr_window *) bundle;
     quest_vr_presentation desired;
     quest_vr_get_presentation(&desired);
@@ -88,7 +91,46 @@ bool quest_vr_enabled(void) {
            !strcmp(renderer, "quest_mobileglues");
 }
 
+bool quest_vr_vulkan_enabled(void) {
+    const char *mode = getenv("FCL_VR_VULKAN");
+    return mode && !strcmp(mode, "1") && quest_vr_enabled();
+}
+
+// The bundled GLFWVulkan ABI treats a GLFW handle as an ANativeWindow. Give each NO_API
+// window a real, independently owned endpoint even before a panel or XR session exists.
+// Vivecraft presents through the generation-tracked panel or the OpenXR eye swapchains.
+JNIEXPORT jlong JNICALL
+Java_org_lwjgl_glfw_GLFW_nglfwCreateQuestVulkanWindow(JNIEnv *env, jclass cls, jint width, jint height,
+                                                      jlongArray owner) {
+    (void) cls;
+    if (!owner || (*env)->GetArrayLength(env, owner) < 1 || width <= 0 || height <= 0) return 0;
+    AImageReader *reader = NULL;
+    ANativeWindow *window = NULL;
+    media_status_t result = AImageReader_new(width, height, AIMAGE_FORMAT_RGBA_8888, 2, &reader);
+    if (result == AMEDIA_OK) result = AImageReader_getWindow(reader, &window);
+    if (result != AMEDIA_OK || !window) {
+        if (reader) AImageReader_delete(reader);
+        VR_ERROR("Cannot create Quest GLFW NO_API window: media status %d", result);
+        return 0;
+    }
+    jlong handle = (jlong) (uintptr_t) reader;
+    (*env)->SetLongArrayRegion(env, owner, 0, 1, &handle);
+    if ((*env)->ExceptionCheck(env)) {
+        AImageReader_delete(reader);
+        return 0;
+    }
+    VR_LOG("Created Quest GLFW NO_API window (%dx%d)", width, height);
+    return (jlong) (uintptr_t) window;
+}
+
+JNIEXPORT void JNICALL
+Java_org_lwjgl_glfw_GLFW_nglfwDestroyQuestVulkanWindow(JNIEnv *env, jclass cls, jlong owner) {
+    (void) env; (void) cls;
+    AImageReader_delete((AImageReader *) (uintptr_t) owner);
+}
+
 bool quest_vr_init(void) {
+    vulkan_presentation = quest_vr_vulkan_enabled();
     setenv("POJAVEXEC_EGL", "libmobileglues.so", 1);
     unsetenv("SFPEW_LAYER");
     unsetenv("LIBGL_GLES");
@@ -104,12 +146,12 @@ bool quest_vr_init(void) {
         VR_ERROR("Native GLES display initialization failed: 0x%x", eglGetError_p());
         return false;
     }
-    VR_LOG("Initialized MobileGlues VR; Minecraft will render to OpenXR eye swapchains");
+    VR_LOG("Initialized MobileGlues VR%s", vulkan_presentation ? " with an auxiliary EGL pbuffer" : "");
     return true;
 }
 
 gl_render_window_t *quest_vr_init_context(gl_render_window_t *share) {
-    if (vr_display == EGL_NO_DISPLAY) return NULL;
+    if (vr_display == EGL_NO_DISPLAY && (!quest_vr_vulkan_enabled() || !quest_vr_init())) return NULL;
     quest_vr_window *window = calloc(1, sizeof(*window));
     if (!window) return NULL;
     gl_render_window_t *bundle = &window->base;
@@ -157,6 +199,7 @@ gl_render_window_t *quest_vr_get_current(void) { return vr_current; }
 
 void quest_vr_make_current(gl_render_window_t *bundle) {
     if (!bundle) {
+        if (!vr_current) return;
         if (eglMakeCurrent_p(vr_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT))
             vr_current = NULL;
         return;
@@ -179,7 +222,7 @@ void quest_vr_make_current(gl_render_window_t *bundle) {
 
 void quest_vr_swap_buffers(void) {
     if (!vr_current) return;
-    if (vr_current == vr_primary) quest_vr_notify_game_frame();
+    if (!vulkan_presentation && vr_current == vr_primary) quest_vr_notify_game_frame();
     if (!prepare_swap_surface(vr_current)) {
         glFlush();
         return;

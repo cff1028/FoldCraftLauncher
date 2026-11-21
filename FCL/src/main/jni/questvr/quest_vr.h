@@ -5,6 +5,7 @@
 #include "ctxbridges/gl_bridge.h"
 
 bool quest_vr_enabled(void);
+bool quest_vr_vulkan_enabled(void);
 bool quest_vr_init(void);
 gl_render_window_t *quest_vr_init_context(gl_render_window_t *share);
 gl_render_window_t *quest_vr_get_current(void);

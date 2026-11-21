@@ -9,6 +9,8 @@
 #include <dlfcn.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#define VK_USE_PLATFORM_ANDROID_KHR
+#include <vulkan/vulkan.h>
 #include "interop.h"
 #include "presentation.h"
 
@@ -49,6 +51,7 @@ typedef struct image_set {
 typedef struct {
     JavaVM *android_vm;
     jobject android_activity;
+    jobject android_application;
     jclass android_bridge;
     jmethodID await_immersive_activity;
     jmethodID on_game_frame;
@@ -59,6 +62,7 @@ typedef struct {
     bool game_frame_notified;
     bool immersive;
     uint64_t surface_generation;
+    uint64_t presented_vulkan_generation;
     ANativeWindow *flat_window;
     pthread_mutex_t mutex;
     image_set *images;
@@ -126,12 +130,13 @@ static void fail(JNIEnv *env, const char *message) {
     if (exception) (*env)->ThrowNew(env, exception, message);
 }
 
-JNIEXPORT void JNICALL
-Java_com_tungsten_fcl_vr_QuestVrBridge_nativeInitialize(JNIEnv *env, jclass cls, jobject activity) {
+JNIEXPORT jboolean JNICALL
+Java_com_tungsten_fcl_vr_QuestVrBridge_nativeInitialize(JNIEnv *env, jclass cls, jobject activity,
+                                                       jobject application) {
     quest_vr_state *state = get_state();
     if (!state) {
         state = calloc(1, sizeof(*state));
-        if (!state) { fail(env, "Cannot allocate the Android OpenXR bridge state"); return; }
+        if (!state) { fail(env, "Cannot allocate the Android OpenXR bridge state"); return JNI_FALSE; }
         pthread_mutex_init(&state->mutex, NULL);
         char address[2 * sizeof(uintptr_t) + 1];
         snprintf(address, sizeof(address), "%" PRIxPTR, (uintptr_t) state);
@@ -139,11 +144,18 @@ Java_com_tungsten_fcl_vr_QuestVrBridge_nativeInitialize(JNIEnv *env, jclass cls,
             pthread_mutex_destroy(&state->mutex);
             free(state);
             fail(env, "Cannot share the Android OpenXR bridge state with the JVM");
-            return;
+            return JNI_FALSE;
         }
     }
     pthread_mutex_lock(&state->mutex);
     if (!state->android_vm) (*env)->GetJavaVM(env, &state->android_vm);
+    if (!state->android_application) {
+        state->android_application = (*env)->NewGlobalRef(env, application);
+        if (!state->android_application) {
+            pthread_mutex_unlock(&state->mutex);
+            return JNI_FALSE;
+        }
+    }
     if (!state->android_bridge) {
         state->await_immersive_activity = (*env)->GetStaticMethodID(env, cls, "awaitImmersiveActivity", "()Z");
         if (state->await_immersive_activity)
@@ -157,7 +169,7 @@ Java_com_tungsten_fcl_vr_QuestVrBridge_nativeInitialize(JNIEnv *env, jclass cls,
         if (!state->android_bridge) {
             pthread_mutex_unlock(&state->mutex);
             if (!(*env)->ExceptionCheck(env)) fail(env, "Cannot resolve the Android VR activity handoff");
-            return;
+            return JNI_FALSE;
         }
     }
     if (!state->android_activity) state->android_activity = (*env)->NewGlobalRef(env, activity);
@@ -172,8 +184,7 @@ Java_com_tungsten_fcl_vr_QuestVrBridge_nativeInitialize(JNIEnv *env, jclass cls,
         }
     }
     pthread_mutex_unlock(&state->mutex);
-    if (!same && !(*env)->ExceptionCheck(env))
-        fail(env, "An OpenXR Activity is already active. Restart the game process before replacing it.");
+    return same ? JNI_TRUE : JNI_FALSE;
 }
 
 void quest_vr_set_flat_surface(JNIEnv *env, jobject surface) {
@@ -209,7 +220,10 @@ Java_com_tungsten_fcl_vr_QuestVrBridge_nativeSetImmersive(JNIEnv *env, jclass cl
     quest_vr_state *state = get_state();
     if (!state) { fail(env, "Quest VR bridge is not initialized"); return; }
     pthread_mutex_lock(&state->mutex);
-    state->immersive = immersive == JNI_TRUE;
+    if (state->immersive != (immersive == JNI_TRUE)) {
+        state->immersive = immersive == JNI_TRUE;
+        state->surface_generation++;
+    }
     pthread_mutex_unlock(&state->mutex);
 }
 
@@ -263,9 +277,104 @@ void quest_vr_notify_flat_frame(void) {
     if (state) notify_android(state, state->on_first_flat_frame);
 }
 
+// The embedded game JVM creates the panel surface with the same Vulkan loader and
+// instance as Minecraft. The Android UI can replace the panel while this runs.
+static quest_vr_state *vulkan_panel_state(void) {
+    const char *mode = getenv("FCL_VR_VULKAN");
+    return mode && strcmp(mode, "1") == 0 ? get_state() : NULL;
+}
+
+static uint64_t flat_generation_locked(const quest_vr_state *state) {
+    return state->flat_window && !state->immersive ? state->surface_generation : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tungsten_fcl_vr_QuestVrBridge_nativeIsFlatFrameReady(JNIEnv *env, jclass cls) {
+    (void) env; (void) cls;
+    quest_vr_state *state = vulkan_panel_state();
+    if (!state) return JNI_TRUE;
+    pthread_mutex_lock(&state->mutex);
+    uint64_t current = flat_generation_locked(state);
+    bool ready = current && current == state->presented_vulkan_generation;
+    pthread_mutex_unlock(&state->mutex);
+    return ready;
+}
+
+JNIEXPORT jlong JNICALL
+Java_org_vivecraft_util_VLoader_getVulkanFlatSurfaceGeneration(JNIEnv *env, jclass cls) {
+    (void) env; (void) cls;
+    quest_vr_state *state = vulkan_panel_state();
+    if (!state) return 0;
+    // A Vulkan swapchain needs its window before the first present can take place.
+    quest_vr_notify_game_frame();
+    pthread_mutex_lock(&state->mutex);
+    uint64_t generation = flat_generation_locked(state);
+    pthread_mutex_unlock(&state->mutex);
+    return (jlong) generation;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_vivecraft_util_VLoader_createVulkanFlatSurface(JNIEnv *env, jclass cls, jlong generation,
+        jlong get_proc_addr, jlong vk_instance, jlongArray surface_out) {
+    (void) cls;
+    if (!surface_out || (*env)->GetArrayLength(env, surface_out) < 1) return VK_ERROR_INITIALIZATION_FAILED;
+    const jlong zero = 0;
+    (*env)->SetLongArrayRegion(env, surface_out, 0, 1, &zero);
+    if (!vk_instance || !get_proc_addr) return VK_ERROR_INITIALIZATION_FAILED;
+    quest_vr_state *state = vulkan_panel_state();
+    if (!state || generation <= 0) return VK_ERROR_SURFACE_LOST_KHR;
+    pthread_once(&window_once, load_native_window);
+    if (!native_window_acquire || !native_window_release) return VK_ERROR_INITIALIZATION_FAILED;
+    pthread_mutex_lock(&state->mutex);
+    ANativeWindow *window = NULL;
+    if (flat_generation_locked(state) == (uint64_t) generation) {
+        window = state->flat_window;
+        native_window_acquire(window);
+    }
+    pthread_mutex_unlock(&state->mutex);
+    if (!window) return VK_ERROR_SURFACE_LOST_KHR;
+
+    VkInstance instance = (VkInstance) (uintptr_t) vk_instance;
+    PFN_vkGetInstanceProcAddr get_proc = (PFN_vkGetInstanceProcAddr) (uintptr_t) get_proc_addr;
+    PFN_vkCreateAndroidSurfaceKHR create = (PFN_vkCreateAndroidSurfaceKHR) get_proc(instance, "vkCreateAndroidSurfaceKHR");
+    PFN_vkDestroySurfaceKHR destroy = (PFN_vkDestroySurfaceKHR) get_proc(instance, "vkDestroySurfaceKHR");
+    VkAndroidSurfaceCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = window};
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkResult result = create && destroy ? create(instance, &info, NULL, &surface) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    native_window_release(window);
+    if (result != VK_SUCCESS) return result;
+    pthread_mutex_lock(&state->mutex);
+    bool current = flat_generation_locked(state) == (uint64_t) generation;
+    pthread_mutex_unlock(&state->mutex);
+    if (current) {
+        jlong handle = (jlong) (uint64_t) surface;
+        (*env)->SetLongArrayRegion(env, surface_out, 0, 1, &handle);
+        if (!(*env)->ExceptionCheck(env)) return VK_SUCCESS;
+    }
+    destroy(instance, surface, NULL);
+    return VK_ERROR_SURFACE_LOST_KHR;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vivecraft_util_VLoader_onVulkanFlatFramePresented(JNIEnv *env, jclass cls, jlong generation) {
+    (void) env; (void) cls;
+    quest_vr_state *state = vulkan_panel_state();
+    if (!state || generation <= 0) return;
+    pthread_mutex_lock(&state->mutex);
+    bool first = flat_generation_locked(state) == (uint64_t) generation &&
+            state->presented_vulkan_generation != (uint64_t) generation;
+    if (first) state->presented_vulkan_generation = (uint64_t) generation;
+    pthread_mutex_unlock(&state->mutex);
+    if (first) quest_vr_notify_flat_frame();
+}
+
 void quest_vr_notify_openxr_stopped(void) {
     quest_vr_state *state = get_state();
-    if (state) notify_android(state, state->on_openxr_stopped);
+    if (!state) return;
+    pthread_mutex_lock(&state->mutex);
+    bool immersive = state->immersive;
+    pthread_mutex_unlock(&state->mutex);
+    if (immersive) notify_android(state, state->on_openxr_stopped);
 }
 
 void quest_vr_openxr_instance_created(void) {
@@ -313,6 +422,23 @@ static bool await_immersive_activity(quest_vr_state *state) {
     }
     if (attached_here) (*state->android_vm)->DetachCurrentThread(state->android_vm);
     return resumed == JNI_TRUE;
+}
+
+bool quest_vr_await_vulkan_activity(void) {
+    quest_vr_state *state = vulkan_panel_state();
+    // Only FCL-managed Vulkan launches have an Android presentation gate.
+    return !state || await_immersive_activity(state);
+}
+
+JNIEXPORT jlong JNICALL
+Java_org_vivecraft_util_VLoader_getDalvikApplicationContext(JNIEnv *env, jclass cls) {
+    (void) cls;
+    quest_vr_state *state = get_state();
+    if (!state || !state->android_application) {
+        fail(env, "The Android application context is unavailable for OpenXR loader initialization");
+        return 0;
+    }
+    return (jlong) (uintptr_t) state->android_application;
 }
 
 JNIEXPORT jlong JNICALL

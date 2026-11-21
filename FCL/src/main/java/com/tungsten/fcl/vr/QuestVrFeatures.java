@@ -18,12 +18,23 @@ public final class QuestVrFeatures {
 
     static boolean isQuestDevice(String manufacturer, String brand, String model) {
         if (!isMetaBrand(manufacturer) && !isMetaBrand(brand)) return false;
-        String name = normalize(model);
-        if (name.startsWith("oculus ")) name = name.substring(7).trim();
-        else if (name.startsWith("meta ")) name = name.substring(5).trim();
+        String name = questModelName(model);
         return name.equals("quest") || name.startsWith("quest ")
                 || name.startsWith("quest-")
                 || name.length() > 5 && name.startsWith("quest") && Character.isDigit(name.charAt(5));
+    }
+
+    public static boolean isQuest3Family() {
+        if (!isMetaBrand(Build.MANUFACTURER) && !isMetaBrand(Build.BRAND)) return false;
+        String name = questModelName(Build.MODEL).replace(" ", "").replace("-", "");
+        return name.equals("quest3") || name.equals("quest3s");
+    }
+
+    private static String questModelName(String model) {
+        String name = normalize(model);
+        if (name.startsWith("oculus ")) return name.substring(7).trim();
+        if (name.startsWith("meta ")) return name.substring(5).trim();
+        return name;
     }
 
     private static boolean isMetaBrand(String value) {

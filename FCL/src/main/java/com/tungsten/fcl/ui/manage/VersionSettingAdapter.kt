@@ -94,10 +94,17 @@ class VersionSettingAdapter(
     var vulkanCheckSummary: String = ""
 
     private var vrGraphicsSettings: QuestVrGraphicsSettings? = null
+    private var vrSupportsVulkan = false
 
-    fun setVrGraphicsSettings(settings: QuestVrGraphicsSettings?) {
+    fun setVrGraphicsSettings(settings: QuestVrGraphicsSettings?, supportsVulkan: Boolean = false) {
+        val vulkanRowsChanged = vrSupportsVulkan != supportsVulkan
         vrGraphicsSettings = settings
+        vrSupportsVulkan = supportsVulkan
         if (!::versionSetting.isInitialized) return
+        if (vulkanRowsChanged) {
+            rebuild()
+            return
+        }
         rows = buildRows()
         refreshRow(VersionSettingTag.EDIT_VR_RENDER_SCALE)
         refreshRow(VersionSettingTag.VR_FSAA)
@@ -159,6 +166,7 @@ class VersionSettingAdapter(
     private fun buildRows(): List<Row> {
         val result = mutableListOf<Row>()
         val vrEnabled = !globalSetting && QuestVrFeatures.isVrEnabled(context, versionSetting.isVrEnabled)
+        val showVulkanSettings = !vrEnabled || vrSupportsVulkan
         if (!globalSetting) {
             result += Row.SwitchRow(
                 labelRes = R.string.settings_type_special_enable,
@@ -242,7 +250,7 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_fcl_controller_desc,
                 group = SettingGroup.Common
             )
-            if (!vrEnabled) result += Row.ValueRow(
+            if (showVulkanSettings) result += Row.ValueRow(
                 R.string.settings_fcl_graphics_backend,
                 { versionSetting.graphicsBackend },
                 VersionSettingTag.EDIT_BACKEND,
@@ -258,7 +266,7 @@ class VersionSettingAdapter(
                 descriptionRes = R.string.settings_fcl_renderer_desc,
                 group = SettingGroup.Render,
             )
-            if (!vrEnabled) {
+            if (showVulkanSettings) {
                 result += Row.SwitchRow(
                     R.string.settings_fcl_vulkan_driver_system,
                     { versionSetting.isVKDriverSystem },

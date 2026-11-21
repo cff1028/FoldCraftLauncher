@@ -136,6 +136,8 @@ public class FCLBridge {
 
     public native long dlopen(String path);
 
+    public static native boolean prepareVulkanLoader();
+
     public native void setLdLibraryPath(String path);
 
     public native void setupExitTrap(FCLBridge bridge);

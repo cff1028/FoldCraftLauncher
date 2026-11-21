@@ -14,7 +14,6 @@ import android.system.Os;
 import android.util.ArrayMap;
 
 import com.mio.data.Renderer;
-import com.mio.device.VulkanCheckManager;
 import com.mio.plugin.DriverPlugin;
 import com.mio.plugin.FFmpegPlugin;
 import com.mio.plugin.NativeLibPlugin;
@@ -265,7 +264,7 @@ public class FCLauncher {
         }
         // 检测判定设备存在可由 vkshim 补齐的驱动缺口（divisor 扩展合成 /
         // fillModeNonSolid 降级模拟）时，经 vkshim 包装系统 Vulkan 加载器
-        if (VulkanCheckManager.INSTANCE.getNeedsVulkanShim()) {
+        if (config.getNeedsVulkanShim()) {
             envMap.put("VKSHIM_ENABLE", "1");
         }
     }
@@ -492,6 +491,10 @@ public class FCLauncher {
         addCustomEnv(config, envMap);
         if (render && !config.isVrEnabled() && config.getRenderer().isEqual(Renderer.ID_MOBILEGLUES)) {
             envMap.put("MG_DIR_PATH", getNormalMobileGluesDirectory(config).getAbsolutePath());
+            String gameVersion = config.getMinecraftVersion();
+            if (config.getRenderer().getPath().isEmpty() && QuestVrRuntime.supportsVulkan(gameVersion)) {
+                envMap.put("FCL_VK_JAVA_SURFACE", "1");
+            }
             if (config.getRenderer().getPath().isEmpty() && !config.getSfpewLayerEnabled()) {
                 for (String key : new String[]{"SFPEW_LAYER", "SFPEW_EGL", "SFPEW_RELAXED_CONTEXT"}) {
                     envMap.remove(key);
@@ -691,6 +694,10 @@ public class FCLauncher {
 
         bridge.dlopen(nativeDir + "/libopenal.so");
         if (config.isVrEnabled()) {
+            // SDL and LWJGL must see the same Vulkan loader before either can create an instance.
+            if (config.isVrVulkanEnabled() && !FCLBridge.prepareVulkanLoader()) {
+                throw new IOException("Cannot load the selected Vulkan driver for Quest VR");
+            }
             String[] required = {"libopenxr_loader.so", "libquest_openxr.so", "libvloader.so",
                     config.getRenderer().getGlName()};
             for (String library : required) {

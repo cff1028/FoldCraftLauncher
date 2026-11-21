@@ -1,6 +1,8 @@
 ## Quest VR 分支
 
-FCL Quest VR **0.1.1**，基于 [FCL 1.3.4.5](https://github.com/FCL-Team/FoldCraftLauncher/releases/tag/1.3.4.5)，面向 Quest 3 / ARM64。包名 `com.questfcl.launcher`，可与原版共存。
+FCL Quest VR **0.2.0**，基于 [FCL 1.3.4.5](https://github.com/FCL-Team/FoldCraftLauncher/releases/tag/1.3.4.5)，面向 Quest 3 / 3S（ARM64）。包名 `com.questfcl.launcher`，可与原版共存。
+
+Minecraft 26.2 及以上可在平面和 Quest VR 模式选择 Vulkan，兼容的 Quest 3 / 3S 可选系统驱动或内置 Turnip。配套 Vivecraft 支持在平面加载资源后进入 VR，并在游戏内往返切换。[26.2 模组（OpenXR.5）](https://github.com/cff1028/VivecraftMod/releases/tag/26.2-1.3.15-OpenXR.5) · [26.3 模组（OpenXR.4）](https://github.com/cff1028/VivecraftMod/releases/tag/26.3-1.3.18-OpenXR.4)
 
 - 每个实例独立开启 Quest VR，支持渲染比例、FSAA、双眼同步和游戏内 VR / 平面切换。双眼同步默认开启，用于改善重载光影抖动。
 - 集成 MobileGlues 2.0.1 Dev1 与 26.3 兼容修复；Vivecraft 下载可选择 QuestCraft 或 cff1028 来源。公开版不含 LTW。

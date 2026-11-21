@@ -124,6 +124,9 @@ public final class QuestGameBootstrap {
         launch.logDir = config.getLogDir();
         launch.javaPath = config.getJavaPath();
         launch.workingDir = config.getWorkingDir();
+        launch.minecraftVersion = config.getMinecraftVersion();
+        launch.vrVulkanEnabled = config.isVrVulkanEnabled();
+        launch.needsVulkanShim = config.getNeedsVulkanShim();
         launch.vrStereoSyncEnabled = config.getVrStereoSyncEnabled();
         launch.sfpewLayerEnabled = config.getSfpewLayerEnabled();
         launch.renderer = config.getRenderer();
@@ -203,6 +206,9 @@ public final class QuestGameBootstrap {
         FCLConfig config = new FCLConfig(activity.getApplicationContext(), launch.logDir,
                 launch.javaPath, launch.workingDir, launch.renderer, launch.args);
         config.setVrEnabled(true);
+        config.setMinecraftVersion(launch.minecraftVersion);
+        config.setVrVulkanEnabled(launch.vrVulkanEnabled);
+        config.setNeedsVulkanShim(launch.needsVulkanShim);
         config.setVrStereoSyncEnabled(!Boolean.FALSE.equals(launch.vrStereoSyncEnabled));
         config.setSfpewLayerEnabled(Boolean.TRUE.equals(launch.sfpewLayerEnabled));
         config.setHighGameThreadPriority(!Boolean.FALSE.equals(launch.highGameThreadPriority));
@@ -233,10 +239,11 @@ public final class QuestGameBootstrap {
     }
 
     private static final class Launch {
-        String logDir, javaPath, workingDir, lwjglVersion;
+        String logDir, javaPath, workingDir, lwjglVersion, minecraftVersion;
         Renderer renderer;
         String[] args;
         boolean useVKDriverSystem, useInputStack, forceResolution;
+        boolean vrVulkanEnabled, needsVulkanShim;
         Boolean highGameThreadPriority;
         Boolean vrStereoSyncEnabled;
         Boolean sfpewLayerEnabled;

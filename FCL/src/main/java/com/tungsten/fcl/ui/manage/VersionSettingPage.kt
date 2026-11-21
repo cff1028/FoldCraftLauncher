@@ -36,6 +36,7 @@ import com.tungsten.fcl.vr.VivecraftInspector
 import com.tungsten.fcl.vr.QuestVivecraftTargets
 import com.tungsten.fcl.vr.QuestVrGraphicsSettings
 import com.tungsten.fcl.vr.QuestVrFeatures
+import com.tungsten.fcl.vr.QuestVrRuntime
 import com.tungsten.fcl.vr.VrWarnings
 import com.tungsten.fclauncher.utils.FCLPath
 import com.tungsten.fclcore.event.Event
@@ -259,18 +260,20 @@ class VersionSettingPage(
         if (globalSetting || !QuestVrFeatures.isVrEnabled(context, targetSetting.isVrEnabled)) return
         val gameDirectory = targetProfile.repository.getRunDirectory(targetVersion).toPath()
         vrGraphicsJob = activity.lifecycleScope.launch {
-            val graphics = withContext(Dispatchers.IO) {
-                try {
+            val (graphics, supportsVulkan) = withContext(Dispatchers.IO) {
+                val settings = try {
                     QuestVrGraphicsSettings.read(gameDirectory)
                 } catch (failure: IOException) {
                     Logging.LOG.log(Level.WARNING, "Cannot read instance VR graphics settings", failure)
                     QuestVrGraphicsSettings.defaults()
                 }
+                val gameVersion = runCatching { targetProfile.repository.getGameVersion(targetVersion).orElse(null) }.getOrNull()
+                settings to QuestVrRuntime.supportsVulkan(gameVersion)
             }
             if (generation == vrGraphicsGeneration && profile === targetProfile &&
                 versionId == targetVersion && lastVersionSetting === targetSetting &&
                 QuestVrFeatures.isVrEnabled(context, targetSetting.isVrEnabled)) {
-                adapter.setVrGraphicsSettings(graphics)
+                adapter.setVrGraphicsSettings(graphics, supportsVulkan)
             }
         }
     }
@@ -454,9 +457,7 @@ class VersionSettingPage(
             )
 
             VersionSettingTag.EDIT_DRIVER -> {
-                val versionSetting =
-                    if (globalSetting) Profiles.getSelectedProfile().globalVersionSetting
-                    else Profiles.getSelectedProfile().versionSetting
+                val versionSetting = lastVersionSetting
                 showItemSelectionDialog(
                     context,
                     context.getString(R.string.settings_fcl_driver),
@@ -540,13 +541,19 @@ class VersionSettingPage(
                 val instanceSetting = profile.repository.specializeVersionSetting(currentVersionId)
                     ?: return
                 if (checked) {
+                    if (instanceSetting !== lastVersionSetting) {
+                        // Enabling VR creates per-instance settings when the instance inherits global settings.
+                        instanceSetting.graphicsBackend = lastVersionSetting.graphicsBackend
+                        instanceSetting.isVKDriverSystem = lastVersionSetting.isVKDriverSystem
+                        instanceSetting.driver = lastVersionSetting.driver
+                        instanceSetting.isNotCheckVulkan = lastVersionSetting.isNotCheckVulkan
+                    }
                     if (!RendererManager.getRenderer(instanceSetting.renderer).vrOnly) {
                         instanceSetting.nonVrRenderer = instanceSetting.renderer
                     }
                     instanceSetting.renderer = RendererManager.getRendererForMode(
                         instanceSetting.renderer, true
                     ).id
-                    instanceSetting.graphicsBackend = "opengl"
                 } else {
                     instanceSetting.renderer = RendererManager.getRendererForMode(
                         instanceSetting.nonVrRenderer, false

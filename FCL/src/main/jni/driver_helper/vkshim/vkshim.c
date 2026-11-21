@@ -1,5 +1,5 @@
-// vkshim —— 系统 Vulkan 加载器包装层。
-// 启动器检测到设备存在驱动能力缺口时（VKSHIM_ENABLE=1）经本层加载，按缺口类型合成：
+// vkshim —— 所选 Vulkan 加载器的包装层。平面游戏可启用 Java 可表示的交换链上限。
+// 系统驱动存在能力缺口且启用 VKSHIM_ENABLE 时，另按缺口类型合成：
 // 一、驱动缺失 VK_EXT_vertex_attribute_divisor 但提供 VK_KHR_vertex_attribute_divisor：
 //   1. vkEnumerateDeviceExtensionProperties 补报 EXT 扩展；
 //   2. vkCreateDevice 把启用列表里的 EXT 换成 KHR；EXT v1/v2 应用不传 features 结构，
@@ -23,17 +23,13 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "log.h"
-
-#if defined(__aarch64__) || defined(__x86_64__)
-#define SYSTEM_VULKAN_LOADER_PATH "/system/lib64/libvulkan.so"
-#else
-#define SYSTEM_VULKAN_LOADER_PATH "/system/lib/libvulkan.so"
-#endif
 
 #define EXT_SPEC_VERSION 3
 #define MAX_TRACKED_PHYSICAL_DEVICES 8
@@ -65,6 +61,9 @@ struct chain_node {
 
 static void* g_loader;
 static bool g_ready;
+static bool g_java_surface;
+static bool g_feature_compat;
+static atomic_flag g_surface_limit_logged = ATOMIC_FLAG_INIT;
 
 static PFN_vkCreateInstance real_create_instance;
 static PFN_vkDestroyInstance real_destroy_instance;
@@ -73,6 +72,7 @@ static PFN_vkEnumerateInstanceLayerProperties real_enumerate_instance_layer_prop
 static PFN_vkEnumerateInstanceVersion real_enumerate_instance_version;
 static PFN_vkGetInstanceProcAddr real_get_instance_proc_addr;
 static PFN_vkGetDeviceProcAddr real_get_device_proc_addr;
+static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_surface_capabilities;
 
 // 加载器返回的实例级桩按传入句柄分派，跨实例通用，解析一次即可
 static struct {
@@ -260,19 +260,13 @@ static void ensure_instance_procs(const void* dispatchable) {
     pthread_mutex_unlock(&g_lock);
 }
 
-static void __attribute__((constructor)) vkshim_init(void) {
-    // 测试与诊断用：允许指定被包装的加载器路径
-    const char* overridePath = getenv("VKSHIM_LOADER_PATH");
-    const char* path = (overridePath != NULL && overridePath[0] != '\0') ? overridePath
-                                                                         : SYSTEM_VULKAN_LOADER_PATH;
-    g_loader = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (g_loader == NULL && overridePath == NULL) {
-        g_loader = dlopen("libvulkan.so", RTLD_LAZY | RTLD_LOCAL);
-    }
-    if (g_loader == NULL) {
-        FCL_LOG("vkshim: failed to load vulkan loader: %s", dlerror());
-        return;
-    }
+// Called once by the launcher before it publishes the loader to LWJGL or SDL.
+bool fcl_vkshim_init(void* loader, bool java_surface, bool feature_compat) {
+    if (loader == NULL) return false;
+    if (g_ready) return g_loader == loader && g_java_surface == java_surface && g_feature_compat == feature_compat;
+    g_loader = loader;
+    g_java_surface = java_surface;
+    g_feature_compat = feature_compat;
 
     real_create_instance = (PFN_vkCreateInstance) dlsym(g_loader, "vkCreateInstance");
     real_destroy_instance = (PFN_vkDestroyInstance) dlsym(g_loader, "vkDestroyInstance");
@@ -283,10 +277,14 @@ static void __attribute__((constructor)) vkshim_init(void) {
     real_enumerate_instance_version = (PFN_vkEnumerateInstanceVersion) dlsym(g_loader, "vkEnumerateInstanceVersion");
     real_get_instance_proc_addr = (PFN_vkGetInstanceProcAddr) dlsym(g_loader, "vkGetInstanceProcAddr");
     real_get_device_proc_addr = (PFN_vkGetDeviceProcAddr) dlsym(g_loader, "vkGetDeviceProcAddr");
+    real_surface_capabilities = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
+            dlsym(g_loader, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
 
     g_ready = real_create_instance != NULL && real_get_instance_proc_addr != NULL &&
               real_enumerate_instance_extension_properties != NULL;
-    FCL_LOG("vkshim: wrapping %s, ready=%d", path, g_ready);
+    FCL_LOG("vkshim: loader=%p java_surface=%d feature_compat=%d ready=%d", loader,
+            java_surface && real_surface_capabilities != NULL, feature_compat, g_ready);
+    return g_ready;
 }
 
 static VkResult shim_enumerate_device_extension_properties(VkPhysicalDevice physicalDevice, const char* pLayerName,
@@ -525,6 +523,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCre
                                                 const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
     if (!g_ready) return VK_ERROR_INCOMPATIBLE_DRIVER;
     VkResult result = real_create_instance(pCreateInfo, pAllocator, pInstance);
+    if (!g_feature_compat) return result;
     if (result == VK_SUCCESS && pInstance != NULL) ensure_instance_procs(*pInstance);
     // 自诊断：实例创建后立即经真实加载器枚举一次，区分"游戏进程内 ICD 加载失败"与
     // "应用的枚举调用未经过 shim"
@@ -571,8 +570,40 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t* pApiVersion)
     return real_enumerate_instance_version(pApiVersion);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL shim_surface_capabilities(VkPhysicalDevice physicalDevice,
+                                                               VkSurfaceKHR surface,
+                                                               VkSurfaceCapabilitiesKHR* capabilities) {
+    VkResult result = real_surface_capabilities(physicalDevice, surface, capabilities);
+    if (result == VK_SUCCESS) {
+        // Android WSI can report UINT32_MAX. Minecraft compares these limits as signed Java ints.
+        VkExtent2D* max = &capabilities->maxImageExtent;
+        if (max->width > INT32_MAX || max->height > INT32_MAX) {
+            if (!atomic_flag_test_and_set(&g_surface_limit_logged)) {
+                FCL_LOG("vkshim: limiting Android swapchain maxImageExtent %u x %u for Java",
+                        max->width, max->height);
+            }
+            if (max->width > INT32_MAX) max->width = INT32_MAX;
+            if (max->height > INT32_MAX) max->height = INT32_MAX;
+        }
+    }
+    return result;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (!g_ready || pName == NULL) return NULL;
+    if (g_java_surface && instance != NULL && real_surface_capabilities != NULL &&
+        strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0) {
+        // Check the extension on this instance. The Android NDK export dispatches by physical device.
+        return real_get_instance_proc_addr(instance, pName) == NULL ? NULL
+                : (PFN_vkVoidFunction) &shim_surface_capabilities;
+    }
+    if (!g_feature_compat) {
+        PFN_vkVoidFunction proc = real_get_instance_proc_addr(instance, pName);
+        if (proc != NULL && strcmp(pName, "vkGetInstanceProcAddr") == 0) {
+            return (PFN_vkVoidFunction) &vkGetInstanceProcAddr;
+        }
+        return proc;
+    }
     // 全局命令一并返回包装导出：应用常经 gipa(NULL, ...) 而非 dlsym 获取它们
     if (strcmp(pName, "vkGetInstanceProcAddr") == 0) return (PFN_vkVoidFunction) &vkGetInstanceProcAddr;
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0) return (PFN_vkVoidFunction) &vkGetDeviceProcAddr;
@@ -609,8 +640,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    if (!g_ready || device == NULL || pName == NULL) return NULL;
-    if (strcmp(pName, "vkCreateGraphicsPipelines") == 0) {
+    if (!g_ready || device == NULL || pName == NULL || real_get_device_proc_addr == NULL) return NULL;
+    if (g_feature_compat && strcmp(pName, "vkCreateGraphicsPipelines") == 0) {
         return (PFN_vkVoidFunction) &shim_create_graphics_pipelines;
     }
     return real_get_device_proc_addr(device, pName);

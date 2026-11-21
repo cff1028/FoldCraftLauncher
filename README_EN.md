@@ -1,6 +1,8 @@
 ## Quest VR fork
 
-FCL Quest VR **0.1.1** is a Quest 3 / ARM64 fork based on FCL 1.3.4.5, maintained by cff1028. Package `com.questfcl.launcher` coexists with upstream FCL.
+FCL Quest VR **0.2.0** is a Quest 3 / 3S (ARM64) fork based on FCL 1.3.4.5, maintained by cff1028. Package `com.questfcl.launcher` coexists with upstream FCL.
+
+Minecraft 26.2 and later can use Vulkan in flat and Quest VR modes. Compatible Quest 3 and 3S headsets can select the system driver or bundled Turnip. The matching Vivecraft builds load resources in the flat panel and support switching into and out of VR in game. [26.2 mod (OpenXR.5)](https://github.com/cff1028/VivecraftMod/releases/tag/26.2-1.3.15-OpenXR.5) · [26.3 mod (OpenXR.4)](https://github.com/cff1028/VivecraftMod/releases/tag/26.3-1.3.18-OpenXR.4)
 
 VR defaults to LWJGL 3.4.1 on Minecraft 26.1 and later. On non-Quest devices, VR features are hidden and disabled by default, with a compatibility warning on first launch. They can be enabled in launcher settings, with confirmation each time the switch is turned on.
 Per-instance VR, render scale, FSAA, stereo synchronization, in-game VR/flat switching and Vivecraft downloads from QuestCraft or cff1028. Stereo synchronization defaults on to improve stability with demanding shaders. Includes MobileGlues 2.0.1 Dev1 with Minecraft 26.3 compatibility fixes; LTW is excluded.

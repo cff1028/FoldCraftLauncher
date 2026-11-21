@@ -1,7 +1,7 @@
 FCL Quest VR — build and relink
 
 Source: https://github.com/cff1028/FoldCraftLauncher
-Release: 0.1.1; package com.questfcl.launcher; VersionCode 21.
+FCL Quest VR 0.2.0 uses package com.questfcl.launcher and Android version code 31.
 Merged upstream FCL 1.3.4.5 (b08db5e96a57bc74ae536fee337b32aa9c9ea156).
 
 VR uses LWJGL 3.4.1 for Minecraft 26.1 and later, and 3.3.3 for older versions.
@@ -9,6 +9,13 @@ Version-specific Android OpenXR/OpenGLES compatibility bindings and rebuild
 instructions are documented in third-party/quest-vr/JAVA-BINDINGS.md.
 Non-Quest devices default to ordinary mode. VR requires explicit opt-in in
 launcher settings, with a warning on first launch and each opt-in activation.
+
+For flat launches with built-in MobileGlues on Minecraft versions with a native
+Vulkan backend (26.2 onwards), the loader adapts Android swapchain size limits
+to Java's signed integers. Compatible Quest 3 / 3S devices use the bundled
+Quest Turnip driver when Turnip is selected.
+See third-party/quest-vr/Quest-Turnip-NOTICE.txt for the Mesa revision and driver hashes.
+The release includes the corresponding patches and NDK cross file in Quest-Turnip-2026.07b-patches.zip.
 
 Built-in MobileGlues runs directly for Minecraft 1.17 / 21w10a and later.
 Older and unknown versions retain the fixed-function compatibility layer.
@@ -18,8 +25,22 @@ Vivecraft downloads offer separate QuestCraft and cff1028 sources.
 
 VR stereo synchronization is enabled by default for each VR instance.
 The launcher applies FCL_VR_STEREO_SYNC at the next game launch. The OpenXR
-adapter waits for preceding GPU commands before releasing each eye image.
-Use the matching unmodified QuestCraft Vivecraft mod for the Minecraft version.
+adapter synchronizes OpenGL ES eye images. In Vulkan mode the Vivecraft mod
+owns queue submission, image transitions and stereo synchronization.
+Quest VR on Minecraft 26.2 onwards offers an explicit Vulkan backend with
+system or Turnip driver selection. It requires a matching Vulkan-capable
+Vivecraft port using an OpenXR Vulkan graphics binding and the VLoader Android panel API.
+Existing GLES Vivecraft builds can use the OpenGL backend.
+
+For Quest Vulkan, the 3.4.1 GLFW bridge creates NO_API windows before a panel
+is available. Use :LWJGL:lwjgl-3.4.1:jar to rebuild the packaged GLFW bridge
+and its runtime asset version before assembling the APK.
+The Android loading splash uses the launcher's existing round icon. A Vulkan
+mod can prepare the XR loader with VLoader.getDalvikApplicationContext() while
+the panel is visible, then request its immersive Activity at presentation time.
+Destroying the last Vulkan session returns to the panel. Creating another
+session resumes the immersive Activity, including when the mod retains the
+original XR instance and Vulkan device.
 
 Use JDK 17, Android SDK 35, NDK 27.0.12077973, CMake 3.22.1 and the Gradle wrapper.
 Set ANDROID_HOME or sdk.dir in local.properties, then:
@@ -37,10 +58,16 @@ An APK signed with a different key requires uninstalling the prior package
 CI build artifacts use a development key; releases use the existing Quest key.
 
 MobileGlues: MobileGlues-2.0.1-Dev1-quest-source.zip includes the patched
-source, dependencies and rebuild scripts. Follow mobileglues-fix/README-source.txt.
+source, dependencies and rebuild scripts.
+Follow third-party/quest-vr/mobileglues-fix/README-source.txt.
 Replace FCL/src/main/jniLibs/arm64-v8a/libmobileglues.so with your rebuilt library.
 The Quest compatibility patch preserves shader-source and procedure-lookup fixes,
 and tracks uniform defaults with the compiled shader in its share group.
+The local vrm-mipmap-20261113-2 build retains the depth storage/upload fixes and
+corrects desktop framebuffer routing/query and GLES sampler capability reporting.
+It also provides GLES-compatible mipmap generation for RGB sRGB textures.
+Optional VRM draw-state and strict raw-error diagnostics are disabled by default;
+see third-party/quest-vr/mobileglues-fix/README-source.txt for their limitations.
 provenance.json records the input revisions, changed files and binary hash.
 
 SimpleFPEWrapper: the release's SimpleFPEWrapper-3042d8a87b4d-source.zip includes

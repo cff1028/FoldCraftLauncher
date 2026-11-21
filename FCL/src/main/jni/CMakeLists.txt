@@ -178,6 +178,7 @@ target_link_libraries(
         log
         dl
         android
+        mediandk
         bytehook::bytehook
         EGL
         GLESv3

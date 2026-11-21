@@ -8,45 +8,77 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdio.h>
 
 #include <androidnsbypass/nsbypass_t.h>
 #include <androidnsbypass/nsbypass.h>
 
 #include "log.h"
 
-static void* driverHandle;
-
+static android_dlopen_ext_t platformOpen;
+static pthread_once_t platformOpenOnce = PTHREAD_ONCE_INIT;
+static pthread_mutex_t namespaceLock = PTHREAD_MUTEX_INITIALIZER;
 static struct android_namespace_t* driverNs;
-
 static uint64_t (*atrace_get_enabled_tags_p)();
 
-__attribute__((visibility("default"), used)) void *android_dlopen_ext(const char *filename, int flags, const android_dlextinfo *extinfo) {
-    if(!strstr(filename, "vulkan."))
-        return private_dlopen_ext(filename, flags, extinfo, &android_dlopen_ext);
-    if (!driverHandle){
-        // 此命名空间必须隔离，避免污染其他库
-        driverNs = private_create_namespace(
-                "custom-driver-NS",
-                NULL,
-                getenv("DRIVER_PATH"),
-                // 继承调用方命名空间已加载的库列表；
-                // 创建后仅从创建时给定的路径查找链接
-                ANDROID_NAMESPACE_TYPE_SHARED_ISOLATED,
-                NULL,
-                // libvulkan 加载器自身在 vulkanLoaderNs 中，其已加载的 NEEDED 即驱动的 NEEDED
-                extinfo->library_namespace,
-                __builtin_return_address(0)
-                );
-        const char* driverLib = getenv("DRIVER_LIB");
-        if (driverLib == NULL || !*driverLib)
-            driverLib = "libvulkan_freedreno.so";
-        driverHandle = linker_ns_dlopen(driverLib, RTLD_LOCAL | RTLD_NOW, driverNs);
-        if(driverHandle == NULL) {
-            printf("DriverSupp: Failed to load %s!\n%s\n", driverLib, dlerror());
-            return NULL;
-        }
+static void resolvePlatformOpen(void) {
+    // This library exports the same symbol. Resolve the public NDK entry from libdl itself.
+    void* libdl = dlopen("libdl.so", RTLD_NOW | RTLD_LOCAL);
+    if (libdl != NULL) {
+        platformOpen = (android_dlopen_ext_t)dlsym(libdl, "android_dlopen_ext");
+        dlclose(libdl); // libdl is a DT_NEEDED dependency for the lifetime of this library.
     }
-    return driverHandle;
+    if (platformOpen == NULL) FCL_LOG("DriverSupp: libdl is missing android_dlopen_ext");
+}
+
+static void* openLibrary(const char* filename, int flags, const android_dlextinfo* extinfo,
+                         const void* caller) {
+    pthread_once(&platformOpenOnce, resolvePlatformOpen);
+    if (platformOpen == NULL) return NULL;
+
+    const char* slash = filename == NULL ? NULL : strrchr(filename, '/');
+    const char* name = slash == NULL ? filename : slash + 1;
+    if (name == NULL || strncmp(name, "vulkan.", sizeof("vulkan.") - 1) != 0) {
+        return platformOpen(filename, flags, extinfo);
+    }
+
+    pthread_mutex_lock(&namespaceLock);
+    if (driverNs == NULL) {
+        struct android_namespace_t* parent = NULL;
+        if (extinfo != NULL && (extinfo->flags & ANDROID_DLEXT_USE_NAMESPACE) != 0) {
+            parent = extinfo->library_namespace;
+        }
+        driverNs = private_create_namespace("custom-driver-NS", NULL, getenv("DRIVER_PATH"),
+                                            ANDROID_NAMESPACE_TYPE_SHARED_ISOLATED, NULL, parent, caller);
+    }
+    struct android_namespace_t* ns = driverNs;
+    pthread_mutex_unlock(&namespaceLock);
+    if (ns == NULL) {
+        FCL_LOG("DriverSupp: custom driver namespace unavailable");
+        return NULL;
+    }
+
+    const char* driverLib = getenv("DRIVER_LIB");
+    if (driverLib == NULL || *driverLib == 0) driverLib = "libvulkan_freedreno.so";
+    const android_dlextinfo driverInfo = {
+        .flags = ANDROID_DLEXT_USE_NAMESPACE,
+        .library_namespace = ns
+    };
+    // Open the selected file directly, preserving dlopen/dlclose ownership on repeated requests.
+    void* driver = platformOpen(driverLib, RTLD_LOCAL | RTLD_NOW, &driverInfo);
+    if (driver != NULL) {
+        FCL_LOG("DriverSupp: opened Vulkan driver library %s", driverLib);
+    } else {
+        const char* error = dlerror();
+        FCL_LOG("DriverSupp: failed to open Vulkan driver library %s: %s",
+                driverLib, error != NULL ? error : "unknown error");
+    }
+    return driver;
+}
+
+__attribute__((visibility("default"), used)) void *android_dlopen_ext(const char *filename, int flags, const android_dlextinfo *extinfo) {
+    return openLibrary(filename, flags, extinfo, __builtin_return_address(0));
 }
 
 __attribute__((visibility("default"), used)) void *android_load_sphal_library(const char *filename, int flags) {
@@ -63,7 +95,7 @@ __attribute__((visibility("default"), used)) void *android_load_sphal_library(co
     android_dlextinfo info = {0};
     info.flags = ANDROID_DLEXT_USE_NAMESPACE;
     info.library_namespace = androidNamespace;
-    return android_dlopen_ext(filename, flags, &info);
+    return openLibrary(filename, flags, &info, &openLibrary);
 }
 
 // Android 部分版本不导出该函数，需手动从 libcutils 解析

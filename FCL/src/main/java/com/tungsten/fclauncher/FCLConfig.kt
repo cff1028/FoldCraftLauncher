@@ -2,6 +2,7 @@ package com.tungsten.fclauncher
 
 import android.content.Context
 import com.mio.data.Renderer
+import com.mio.device.VulkanCheckManager
 import com.mio.plugin.RendererPlugin
 import java.io.Serializable
 
@@ -17,9 +18,13 @@ class FCLConfig(
     val args: Array<String>
 ) : Serializable {
 
+    var minecraftVersion: String? = null
+
     var useVKDriverSystem = false
+    var needsVulkanShim = VulkanCheckManager.needsVulkanShim
 
     var isVrEnabled = false
+    var isVrVulkanEnabled = false
 
     var vrStereoSyncEnabled = true
 

@@ -8,6 +8,7 @@
 #include "log.h"
 
 #include <dlfcn.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -46,6 +47,14 @@ static jlong ndlopen_bugfix(__attribute__((unused)) JNIEnv *env,
     return (jlong) dlopen(filename, mode);
 }
 
+static jint ndlclose_preserve_vulkan(__attribute__((unused)) JNIEnv *env,
+                                    __attribute__((unused)) jclass clazz, jlong handle) {
+    // Library.createFromHandle and the dlopen hook both borrow the launcher's process-wide handle.
+    const char* vkptr = getenv("VULKAN_PTR");
+    if (handle != 0 && vkptr != NULL && (uintptr_t)handle == (uintptr_t)strtoull(vkptr, NULL, 16)) return 0;
+    return dlclose((void*)(uintptr_t)handle);
+}
+
 /**
  * Install the LWJGL dlopen hook. This allows us to mitigate linker bugs and add custom library overrides.
  */
@@ -57,10 +66,11 @@ void installLwjglDlopenHook(JNIEnv *env) {
         (*env)->ExceptionClear(env);
         return;
     }
-    JNINativeMethod ndlopenMethod[] = {
-            {"ndlopen", "(JI)J", &ndlopen_bugfix}
+    JNINativeMethod methods[] = {
+            {"ndlopen", "(JI)J", &ndlopen_bugfix},
+            {"ndlclose", "(J)I", &ndlclose_preserve_vulkan}
     };
-    if((*env)->RegisterNatives(env, dynamicLinkLoader, ndlopenMethod, 1) != 0) {
+    if((*env)->RegisterNatives(env, dynamicLinkLoader, methods, sizeof(methods) / sizeof(methods[0])) != 0) {
         FCL_LOG("Failed to register the hooked method");
         (*env)->ExceptionClear(env);
     }

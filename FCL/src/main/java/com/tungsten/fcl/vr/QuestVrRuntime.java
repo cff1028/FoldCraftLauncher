@@ -4,8 +4,10 @@ import android.content.Context;
 import android.os.Build;
 
 import com.mio.data.Renderer;
+import com.mio.device.VulkanCheckManager;
 import com.tungsten.fclauncher.FCLConfig;
 import com.tungsten.fclcore.util.platform.CommandBuilder;
+import com.tungsten.fclcore.util.versioning.GameVersionNumber;
 
 import java.io.File;
 import java.io.IOException;
@@ -22,6 +24,11 @@ public final class QuestVrRuntime {
     private static final String[] JARS = {"lwjgl-openxr.jar", "lwjgl-opengles.jar"};
 
     private QuestVrRuntime() {
+    }
+
+    public static boolean supportsVulkan(String gameVersion) {
+        return gameVersion != null && GameVersionNumber.isKnown(gameVersion)
+                && VulkanCheckManager.INSTANCE.hasVulkanBackend(gameVersion);
     }
 
     public static synchronized void install(Context context, String lwjglVersion) throws IOException {
@@ -118,6 +125,7 @@ public final class QuestVrRuntime {
         environment.put("FCL_VR_STEREO_SYNC", config.isVrEnabled() && config.getVrStereoSyncEnabled() ? "1" : "0");
         if (!config.isVrEnabled()) {
             environment.remove("FCL_VR");
+            environment.remove("FCL_VR_VULKAN");
             return;
         }
         QuestVrFeatures.requireEnabled(config.getContext());
@@ -139,10 +147,17 @@ public final class QuestVrRuntime {
         environment.put("LIBGL_GLES", "libGLESv3.so");
         environment.put("FORCE_VSYNC", "false");
         environment.put("MG_DIR_PATH", new File(config.getContext().getFilesDir(), "quest-vr/mobileglues").getAbsolutePath());
-        environment.remove("VULKAN_DRIVER_SYSTEM");
-        environment.remove("VKSHIM_ENABLE");
-        environment.remove("DRIVER_PATH");
-        environment.remove("DRIVER_LIB");
-        environment.remove("DRIVER_GPU");
+        if (config.isVrVulkanEnabled()) {
+            environment.put("FCL_VR_VULKAN", "1");
+            environment.put("FCL_VK_JAVA_SURFACE", "1");
+        } else {
+            environment.remove("FCL_VR_VULKAN");
+            environment.remove("FCL_VK_JAVA_SURFACE");
+            environment.remove("VULKAN_DRIVER_SYSTEM");
+            environment.remove("VKSHIM_ENABLE");
+            environment.remove("DRIVER_PATH");
+            environment.remove("DRIVER_LIB");
+            environment.remove("DRIVER_GPU");
+        }
     }
 }

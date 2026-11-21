@@ -18,6 +18,7 @@ void quest_vr_set_flat_surface(JNIEnv *env, jobject surface);
 void quest_vr_notify_game_frame(void);
 void quest_vr_notify_flat_frame(void);
 void quest_vr_notify_openxr_stopped(void);
+bool quest_vr_await_vulkan_activity(void);
 void quest_vr_openxr_instance_created(void);
 void quest_vr_openxr_instance_destroyed(void);
 void quest_vr_openxr_create_failed(void);
